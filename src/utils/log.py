@@ -3,9 +3,11 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
+from .path import get_logs_dir
+
 
 def setup_logger(
-    name: str = "Road_Lane_segmentation",
+    name: str = "mmad_inspector",
     log_dir: Optional[str] = None,
     log_level: str = "INFO",
     log_prefix: Optional[str] = None
@@ -13,16 +15,16 @@ def setup_logger(
     """
     Args:
         name: 로거 이름
-        log_dir: 로그 저장 디렉토리
+        log_dir: 로그 저장 디렉토리 (None이면 프로젝트 루트/logs)
         log_level: 로그 레벨
         log_prefix: 로그 파일 prefix (없으면 name 사용)
     """
     # 로그 디렉토리 설정
     if log_dir is None:
-        log_dir = Path("logs")
+        log_dir = get_logs_dir()
     else:
         log_dir = Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True)
 
     # 로그 파일명 생성 (prefix가 없으면 name 사용)
     prefix = log_prefix or name.lower()
