@@ -191,7 +191,6 @@ def main() -> None:
             logger.info(f"Model '{args.model}' will be trained for max_epochs={max_epochs}.")
 
         engine = Engine(
-            task="segmentation",
             default_root_dir=str(out_dir),
             max_epochs=max_epochs,
         )
