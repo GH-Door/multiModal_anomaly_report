@@ -81,7 +81,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Train anomalib models using MMAD_index.csv")
     ap.add_argument("--index-csv", type=str, required=True, help="Path to MMAD_index.csv")
     ap.add_argument("--data-root", type=str, required=True, help="Dataset root containing relative paths from CSV")
-    ap.add_argument("--category", type=str, required=True, help="Category name (e.g., bottle)")
+    ap.add_argument(
+        "--category",
+        type=str,
+        required=True,
+        help="Category name (e.g., bottle). Use 'all' to train/fit each category separately.",
+    )
     ap.add_argument("--model", type=str, default="patchcore", choices=["patchcore", "efficientad", "winclip"])
     ap.add_argument("--train-ratio", type=float, default=0.9, help="Fraction of good samples used for training")
     ap.add_argument("--seed", type=int, default=42)
@@ -91,65 +96,102 @@ def main() -> None:
     ap.add_argument("--train-batch-size", type=int, default=16)
     ap.add_argument("--eval-batch-size", type=int, default=16)
     ap.add_argument("--num-workers", type=int, default=4)
-    ap.add_argument("--max-epochs", type=int, default=1, help="Training epochs (PatchCore typically uses 1)")
+    ap.add_argument(
+        "--max-epochs",
+        type=int,
+        default=1,
+        help="Training epochs (only used for EfficientAD). PatchCore/WinCLIP are fit-only.",
+    )
     ap.add_argument("--copy-files", action="store_true", help="Copy images instead of symlink (Windows-safe)")
     args = ap.parse_args()
 
-    # load + filter
-    records = load_mmad_index_csv(args.index_csv, data_root=args.data_root)
-    cat_records = filter_by_category(records, args.category)
-    if not cat_records:
-        raise ValueError(f"No records for category='{args.category}'. Available categories: {sorted({r.category for r in records})[:50]}")
+    def effective_max_epochs(model_name: str, requested: int) -> int:
+        """EfficientAD is trainable; PatchCore/WinCLIP are effectively fit-only."""
+        if model_name.lower() == "efficientad":
+            return int(requested)
+        return 1
 
-    train_goods, test_records = split_good_train_test(cat_records, train_ratio=args.train_ratio, seed=args.seed)
+    def run_one_category(category: str) -> Path:
+        # load + filter
+        records = load_mmad_index_csv(args.index_csv, data_root=args.data_root)
+        cat_records = filter_by_category(records, category)
+        if not cat_records:
+            raise ValueError(
+                f"No records for category='{category}'. Available categories: {sorted({r.category for r in records})[:50]}"
+            )
 
-    # build folder dataset
-    work_dir = Path(args.work_dir)
-    built = build_anomalib_folder_dataset(
-        train_goods=train_goods,
-        test_records=test_records,
-        out_root=work_dir,
-        category=args.category,
-        copy_files=bool(args.copy_files),
-    )
-    cat_root = Path(built.root) / built.category
-    logger.info(f"Built Folder dataset at: {cat_root}")
+        train_goods, test_records = split_good_train_test(cat_records, train_ratio=args.train_ratio, seed=args.seed)
 
-    # import anomalib pieces
-    from anomalib.data import Folder  # type: ignore
-    from anomalib.engine import Engine  # type: ignore
+        # build folder dataset
+        work_dir = Path(args.work_dir)
+        built = build_anomalib_folder_dataset(
+            train_goods=train_goods,
+            test_records=test_records,
+            out_root=work_dir,
+            category=category,
+            copy_files=bool(args.copy_files),
+        )
+        cat_root = Path(built.root) / built.category
+        logger.info(f"Built Folder dataset at: {cat_root}")
 
-    ModelCls = _import_model(args.model)
+        # import anomalib pieces
+        from anomalib.data import Folder  # type: ignore
+        from anomalib.engine import Engine  # type: ignore
 
-    model_kwargs = {}
-    if args.model == "patchcore":
-        model_kwargs = dict(backbone="wide_resnet50_2", layers=["layer2", "layer3"], pre_trained=True)
+        ModelCls = _import_model(args.model)
 
-    model = ModelCls(**model_kwargs) if model_kwargs else ModelCls()
+        model_kwargs = {}
+        if args.model == "patchcore":
+            model_kwargs = dict(backbone="wide_resnet50_2", layers=["layer2", "layer3"], pre_trained=True)
 
-    datamodule = Folder(
-        name=args.category,
-        root=str(cat_root),
-        normal_dir="train/good",
-        image_size=tuple(args.image_size),
-        train_batch_size=int(args.train_batch_size),
-        eval_batch_size=int(args.eval_batch_size),
-        num_workers=int(args.num_workers),
-    )
-    datamodule.setup()
+        model = ModelCls(**model_kwargs) if model_kwargs else ModelCls()
 
-    out_dir = Path(args.output_dir) / args.model / args.category
-    out_dir.mkdir(parents=True, exist_ok=True)
+        datamodule = Folder(
+            name=category,
+            root=str(cat_root),
+            normal_dir="train/good",
+            image_size=tuple(args.image_size),
+            train_batch_size=int(args.train_batch_size),
+            eval_batch_size=int(args.eval_batch_size),
+            num_workers=int(args.num_workers),
+        )
+        datamodule.setup()
 
-    engine = Engine(
-        task="segmentation",
-        default_root_dir=str(out_dir),
-        max_epochs=int(args.max_epochs),
-    )
-    engine.fit(model=model, datamodule=datamodule)
+        out_dir = Path(args.output_dir) / args.model / category
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    ckpt = _find_ckpt(out_dir)
-    logger.info(f"Training done. Checkpoint: {ckpt}")
+        max_epochs = effective_max_epochs(args.model, args.max_epochs)
+        if args.model in ("patchcore", "winclip"):
+            logger.info(f"Model '{args.model}' is fit-only. max_epochs is forced to {max_epochs}.")
+        else:
+            logger.info(f"Model '{args.model}' will be trained for max_epochs={max_epochs}.")
+
+        engine = Engine(
+            task="segmentation",
+            default_root_dir=str(out_dir),
+            max_epochs=max_epochs,
+        )
+        engine.fit(model=model, datamodule=datamodule)
+
+        ckpt = _find_ckpt(out_dir)
+        logger.info(f"Done. Checkpoint: {ckpt}")
+        return ckpt
+
+    # category=all: loop over all categories in CSV
+    all_records = load_mmad_index_csv(args.index_csv, data_root=args.data_root)
+    categories = sorted({r.category for r in all_records})
+
+    if args.category.lower() == "all":
+        ckpts: list[Path] = []
+        for cat in categories:
+            logger.info(f"=== [{args.model}] category: {cat} ===")
+            ckpts.append(run_one_category(cat))
+        # print all ckpts for convenience
+        print("\n".join(str(p) for p in ckpts))
+        return
+
+    # single category
+    ckpt = run_one_category(args.category)
     print(str(ckpt))
 
 

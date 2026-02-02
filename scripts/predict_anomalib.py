@@ -83,9 +83,25 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Predict anomalib models on MMAD_index.csv")
     ap.add_argument("--index-csv", type=str, required=True)
     ap.add_argument("--data-root", type=str, required=True)
-    ap.add_argument("--category", type=str, required=True)
+    ap.add_argument(
+        "--category",
+        type=str,
+        required=True,
+        help="Category name (e.g., bottle). Use 'all' to predict each category separately.",
+    )
     ap.add_argument("--model", type=str, default="patchcore", choices=["patchcore", "efficientad", "winclip"])
-    ap.add_argument("--ckpt", type=str, required=True, help="Path to trained checkpoint (.ckpt)")
+    ap.add_argument(
+        "--ckpt",
+        type=str,
+        default=None,
+        help="Path to checkpoint (.ckpt). If omitted, script will auto-find under --trained-root/<model>/<category>/.",
+    )
+    ap.add_argument(
+        "--trained-root",
+        type=str,
+        default="outputs_anomalib",
+        help="Where train_anomalib.py wrote checkpoints (used for auto-find).",
+    )
     ap.add_argument("--work-dir", type=str, default="data_anomalib")
     ap.add_argument("--out-dir", type=str, default="predictions_anomalib")
     ap.add_argument("--image-size", type=int, nargs=2, default=[1024, 1024])
@@ -96,67 +112,102 @@ def main() -> None:
     ap.add_argument("--copy-files", action="store_true")
     args = ap.parse_args()
 
-    ckpt = Path(args.ckpt)
-    if not ckpt.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
+    def find_ckpt_for_category(category: str) -> Path:
+        if args.ckpt:
+            ckpt = Path(args.ckpt)
+            if not ckpt.exists():
+                raise FileNotFoundError(f"Checkpoint not found: {ckpt}")
+            return ckpt
 
-    records = load_mmad_index_csv(args.index_csv, data_root=args.data_root)
-    cat_records = filter_by_category(records, args.category)
-    train_goods, test_records = split_good_train_test(cat_records, train_ratio=args.train_ratio, seed=args.seed)
+        base = Path(args.trained_root) / args.model / category
+        if not base.exists():
+            raise FileNotFoundError(
+                f"Could not auto-find checkpoint. Folder not found: {base}. Provide --ckpt or set --trained-root correctly."
+            )
+        # common anomalib path
+        cand = base / "weights" / "lightning" / "model.ckpt"
+        if cand.exists():
+            return cand
 
-    built = build_anomalib_folder_dataset(
-        train_goods=train_goods,
-        test_records=test_records,
-        out_root=Path(args.work_dir),
-        category=args.category,
-        copy_files=bool(args.copy_files),
-    )
-    cat_root = Path(built.root) / built.category
+        ckpts = list(base.rglob("*.ckpt"))
+        if not ckpts:
+            raise FileNotFoundError(f"No .ckpt found under: {base}")
+        ckpts.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return ckpts[0]
 
-    from anomalib.data import Folder  # type: ignore
-    from anomalib.engine import Engine  # type: ignore
+    def run_one_category(category: str) -> Path:
+        ckpt = find_ckpt_for_category(category)
 
-    ModelCls, model_kwargs = _import_model(args.model)
-    model = ModelCls(**model_kwargs) if model_kwargs else ModelCls()
+        records = load_mmad_index_csv(args.index_csv, data_root=args.data_root)
+        cat_records = filter_by_category(records, category)
+        if not cat_records:
+            raise ValueError(f"No records for category='{category}'.")
+        train_goods, test_records = split_good_train_test(cat_records, train_ratio=args.train_ratio, seed=args.seed)
 
-    datamodule = Folder(
-        name=args.category,
-        root=str(cat_root),
-        normal_dir="train/good",
-        image_size=tuple(args.image_size),
-        train_batch_size=1,  # unused in predict
-        eval_batch_size=int(args.eval_batch_size),
-        num_workers=int(args.num_workers),
-    )
-    datamodule.setup()
+        built = build_anomalib_folder_dataset(
+            train_goods=train_goods,
+            test_records=test_records,
+            out_root=Path(args.work_dir),
+            category=category,
+            copy_files=bool(args.copy_files),
+        )
+        cat_root = Path(built.root) / built.category
 
-    out_dir = Path(args.out_dir) / args.model / args.category
-    out_dir.mkdir(parents=True, exist_ok=True)
+        from anomalib.data import Folder  # type: ignore
+        from anomalib.engine import Engine  # type: ignore
 
-    engine = Engine(task="segmentation", default_root_dir=str(out_dir), max_epochs=1)
+        ModelCls, model_kwargs = _import_model(args.model)
+        model = ModelCls(**model_kwargs) if model_kwargs else ModelCls()
 
-    preds = engine.predict(model=model, datamodule=datamodule, ckpt_path=str(ckpt))
+        datamodule = Folder(
+            name=category,
+            root=str(cat_root),
+            normal_dir="train/good",
+            image_size=tuple(args.image_size),
+            train_batch_size=1,  # unused in predict
+            eval_batch_size=int(args.eval_batch_size),
+            num_workers=int(args.num_workers),
+        )
+        datamodule.setup()
 
-    # Flatten predictions
-    rows = []
-    if preds is None:
-        preds = []
-    for batch in preds:
-        # batch can be list or dict
-        if isinstance(batch, list):
-            for item in batch:
-                rows.append(item)
-        else:
-            rows.append(batch)
+        out_dir = Path(args.out_dir) / args.model / category
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    out_csv = out_dir / "pred_scores.csv"
-    with out_csv.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["index", "score"])
-        for i, p in enumerate(rows):
-            w.writerow([i, _extract_score(p)])
+        engine = Engine(task="segmentation", default_root_dir=str(out_dir), max_epochs=1)
+        preds = engine.predict(model=model, datamodule=datamodule, ckpt_path=str(ckpt))
 
-    logger.info(f"Saved prediction scores: {out_csv}")
+        # Flatten predictions
+        rows = []
+        if preds is None:
+            preds = []
+        for batch in preds:
+            if isinstance(batch, list):
+                rows.extend(batch)
+            else:
+                rows.append(batch)
+
+        out_csv = out_dir / "pred_scores.csv"
+        with out_csv.open("w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["index", "score"])
+            for i, p in enumerate(rows):
+                w.writerow([i, _extract_score(p)])
+
+        logger.info(f"Saved prediction scores: {out_csv}")
+        return out_csv
+
+    # category=all
+    all_records = load_mmad_index_csv(args.index_csv, data_root=args.data_root)
+    categories = sorted({r.category for r in all_records})
+    if args.category.lower() == "all":
+        outs: list[Path] = []
+        for cat in categories:
+            logger.info(f"=== predict [{args.model}] category: {cat} ===")
+            outs.append(run_one_category(cat))
+        print("\n".join(str(p) for p in outs))
+        return
+
+    out_csv = run_one_category(args.category)
     print(str(out_csv))
 
 
