@@ -1,226 +1,177 @@
-from __future__ import annotations
-
-import argparse
 from pathlib import Path
-import sys
-import glob
+import json
 
-# Make repo importable when executed as script
-SCRIPT_PATH = Path(__file__).resolve()
-PROJ_ROOT = SCRIPT_PATH.parents[1]
-if str(PROJ_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJ_ROOT))
+from anomalib.models import Patchcore, WinClip, EfficientAd
+from anomalib.engine import Engine
 
-from src.datasets.mmad_index_csv import load_mmad_index_csv, filter_by_category, split_good_train_test
-from src.datasets.anomalib_folder_builder import build_anomalib_folder_dataset
+from src.utils.loaders import load_config
 from src.utils.log import setup_logger
+from src.utils.device import get_device
+from src.datasets.dataloader import MMADLoader
 
 logger = setup_logger(name="TrainAnomalib", log_prefix="train_anomalib")
 
 
-def _import_model(model_name: str):
-    """Import anomalib model class in a version-tolerant way."""
-    try:
-        from anomalib.models import Patchcore  # type: ignore
-    except Exception:
-        Patchcore = None
+class Anomalibs:
+    def __init__(self, config_path: str = "configs/runtime.yaml"):
+        self.config = load_config(config_path)
 
-    # EfficientAD naming varies across versions: EfficientAd / EfficientAD
-    EfficientAD = None
-    for cand in ("EfficientAd", "EfficientAD", "Efficientad"):
-        try:
-            EfficientAD = getattr(__import__("anomalib.models", fromlist=[cand]), cand)
-            break
-        except Exception:
-            continue
-
-    # WinCLIP naming varies: WinClip / WinCLIP
-    WinCLIP = None
-    for cand in ("WinCLIP", "WinClip"):
-        try:
-            WinCLIP = getattr(__import__("anomalib.models", fromlist=[cand]), cand)
-            break
-        except Exception:
-            continue
-
-    name = model_name.lower()
-    if name == "patchcore":
-        if Patchcore is None:
-            raise ImportError("Could not import Patchcore from anomalib.models. Please check anomalib installation.")
-        return Patchcore
-    if name == "efficientad":
-        if EfficientAD is None:
-            raise ImportError("Could not import EfficientAD/EfficientAd from anomalib.models. Please check anomalib version.")
-        return EfficientAD
-    if name == "winclip":
-        if WinCLIP is None:
-            raise ImportError("Could not import WinCLIP/WinClip from anomalib.models. Please check anomalib version.")
-        return WinCLIP
-
-    raise ValueError(f"Unknown model: {model_name}. Choose from: patchcore, efficientad, winclip")
-
-
-def _find_ckpt(output_dir: Path) -> Path:
-    # anomalib(Engine/Lightning) usually writes: <out>/weights/lightning/model.ckpt
-    candidates = [
-        output_dir / "weights" / "lightning" / "model.ckpt",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-
-    # fallback: pick newest .ckpt
-    ckpts = list(output_dir.rglob("*.ckpt"))
-    if not ckpts:
-        raise FileNotFoundError(f"No checkpoint found under: {output_dir}")
-    ckpts.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return ckpts[0]
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Train anomalib models using MMAD_index.csv")
-    ap.add_argument("--index-csv", type=str, required=True, help="Path to MMAD_index.csv")
-    ap.add_argument("--data-root", type=str, required=True, help="Dataset root containing relative paths from CSV")
-    ap.add_argument(
-        "--category",
-        type=str,
-        required=True,
-        help="Category name (e.g., bottle). Use 'all' to train/fit each category separately.",
-    )
-    ap.add_argument("--model", type=str, default="patchcore", choices=["patchcore", "efficientad", "winclip"])
-    ap.add_argument("--train-ratio", type=float, default=0.9, help="Fraction of good samples used for training")
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--work-dir", type=str, default="data_anomalib", help="Folder dataset will be built here")
-    ap.add_argument("--output-dir", type=str, default="outputs_anomalib", help="Training outputs directory")
-    ap.add_argument("--image-size", type=int, nargs=2, default=[1024, 1024])
-    ap.add_argument("--train-batch-size", type=int, default=16)
-    ap.add_argument("--eval-batch-size", type=int, default=16)
-    ap.add_argument("--num-workers", type=int, default=4)
-    ap.add_argument(
-        "--max-epochs",
-        type=int,
-        default=1,
-        help="Training epochs (only used for EfficientAD). PatchCore/WinCLIP are fit-only.",
-    )
-    ap.add_argument("--copy-files", action="store_true", help="Copy images instead of symlink (Windows-safe)")
-    args = ap.parse_args()
-
-    def effective_max_epochs(model_name: str, requested: int) -> int:
-        """EfficientAD is trainable; PatchCore/WinCLIP are effectively fit-only."""
-        if model_name.lower() == "efficientad":
-            return int(requested)
-        return 1
-
-    def run_one_category(category: str) -> Path | None:
-        # load + filter
-        records = load_mmad_index_csv(args.index_csv, data_root=args.data_root)
-        cat_records = filter_by_category(records, category)
-        if not cat_records:
-            raise ValueError(
-                f"No records for category='{category}'. Available categories: {sorted({r.category for r in records})[:50]}"
-            )
-
-        # Split good samples into train/test. Some categories may have very few or no good samples
-        # depending on the CSV contents. We'll handle empty-train safely below.
-        train_goods, test_records = split_good_train_test(cat_records, train_ratio=args.train_ratio, seed=args.seed)
-
-        # build folder dataset
-        work_dir = Path(args.work_dir)
-        built = build_anomalib_folder_dataset(
-            train_goods=train_goods,
-            test_records=test_records,
-            out_root=work_dir,
-            category=category,
-            copy_files=bool(args.copy_files),
+        # model
+        self.model_name = self.config["anomaly"]["model"]
+        self.model_params = self.filter_none(
+            self.config["anomaly"].get(self.model_name, {})
         )
-        cat_root = Path(built.root) / built.category
-        logger.info(f"Built Folder dataset at: {cat_root}")
 
-        # Safety: anomalib Folder dataset will crash if train/good has zero images.
-        # This can happen if a category has no usable good samples or extensions mismatch.
-        train_good_dir = cat_root / "train" / "good"
-        train_imgs = [p for p in train_good_dir.glob("*") if p.is_file()]
-        if len(train_imgs) == 0:
-            logger.warning(
-                f"Skipping category='{category}' because no normal images were found in {train_good_dir}. "
-                "(The CSV may contain no 'good' samples for this category, or paths may be filtered.)"
-            )
-            return None
-
-        # import anomalib pieces
-        from anomalib.data import Folder  # type: ignore
-        from anomalib.engine import Engine  # type: ignore
-
-        # anomalib's Folder datamodule signature changes across versions.
-        # Example: some versions accept `image_size`, others don't.
-        # To prevent hard failures, we filter kwargs by the runtime signature.
-        import inspect
-
-        def _safe_folder_init(**kwargs):
-            sig = inspect.signature(Folder.__init__)
-            allowed = set(sig.parameters.keys())
-            filtered = {k: v for k, v in kwargs.items() if k in allowed}
-            return Folder(**filtered)
-
-        ModelCls = _import_model(args.model)
-
-        model_kwargs = {}
-        if args.model == "patchcore":
-            model_kwargs = dict(backbone="wide_resnet50_2", layers=["layer2", "layer3"], pre_trained=True)
-
-        model = ModelCls(**model_kwargs) if model_kwargs else ModelCls()
-
-        datamodule = _safe_folder_init(
-            name=category,
-            root=str(cat_root),
-            normal_dir="train/good",
-            image_size=tuple(args.image_size),
-            train_batch_size=int(args.train_batch_size),
-            eval_batch_size=int(args.eval_batch_size),
-            num_workers=int(args.num_workers),
+        # training
+        self.training_config = self.filter_none(
+            self.config.get("training", {})
         )
-        datamodule.setup()
 
-        out_dir = Path(args.output_dir) / args.model / category
-        out_dir.mkdir(parents=True, exist_ok=True)
+        # data
+        self.data_root = Path(self.config["data"]["root"])
+        self.output_root = Path(self.config["data"]["output_root"])
 
-        max_epochs = effective_max_epochs(args.model, args.max_epochs)
-        if args.model in ("patchcore", "winclip"):
-            logger.info(f"Model '{args.model}' is fit-only. max_epochs is forced to {max_epochs}.")
+        # engine
+        self.output_config = self.config.get("output", {})
+        self.engine_config = self.config.get("engine", {})
+
+        # device (for logging)
+        self.device = get_device()
+
+        # MMAD loader
+        self.loader = MMADLoader(root=str(self.data_root))
+
+        logger.info(f"Initialized - model: {self.model_name}, device: {self.device}")
+
+    @staticmethod
+    def filter_none(d: dict) -> dict:
+        return {k: v for k, v in d.items() if v is not None}
+
+    def get_model(self):
+        if self.model_name == "patchcore":
+            return Patchcore(**self.model_params)
+        elif self.model_name == "winclip":
+            return WinClip(**self.model_params)
+        elif self.model_name == "efficientad":
+            return EfficientAd(**self.model_params)
         else:
-            logger.info(f"Model '{args.model}' will be trained for max_epochs={max_epochs}.")
+            raise ValueError(f"Unknown model: {self.model_name}")
 
-        engine = Engine(
-            default_root_dir=str(out_dir),
-            max_epochs=max_epochs,
+    def get_datamodule_kwargs(self):
+        # datamodule kwargs from training config
+        kwargs = {}
+        if "train_batch_size" in self.training_config:
+            kwargs["train_batch_size"] = self.training_config["train_batch_size"]
+        if "eval_batch_size" in self.training_config:
+            kwargs["eval_batch_size"] = self.training_config["eval_batch_size"]
+        if "num_workers" in self.training_config:
+            kwargs["num_workers"] = self.training_config["num_workers"]
+        return kwargs
+
+    def get_engine(self):
+        kwargs = {
+            "accelerator": self.engine_config.get("accelerator", "auto"),
+            "devices": 1,
+            "default_root_dir": str(self.output_root),
+            "logger": self.engine_config.get("logger", False),
+            "enable_progress_bar": self.engine_config.get("enable_progress_bar", False),
+        }
+
+        if "max_epochs" in self.training_config:
+            kwargs["max_epochs"] = self.training_config["max_epochs"]
+        return Engine(**kwargs)
+
+    def get_ckpt_path(self, dataset: str, category: str) -> Path | None:
+        if self.model_name == "winclip":
+            return None
+        return (
+            self.output_root
+            / self.model_name.capitalize()
+            / dataset
+            / category
+            / "v0/weights/lightning/model.ckpt"
         )
-        engine.fit(model=model, datamodule=datamodule)
 
-        ckpt = _find_ckpt(out_dir)
-        logger.info(f"Done. Checkpoint: {ckpt}")
-        return ckpt
+    def requires_fit(self) -> bool:
+        return self.model_name != "winclip"
 
-    # category=all: loop over all categories in CSV
-    all_records = load_mmad_index_csv(args.index_csv, data_root=args.data_root)
-    categories = sorted({r.category for r in all_records})
+    def fit(self, dataset: str, category: str):
+        if not self.requires_fit():
+            logger.info(f"{self.model_name} - no training required (zero-shot)")
+            return self
 
-    if args.category.lower() == "all":
-        ckpts: list[Path] = []
-        for cat in categories:
-            logger.info(f"=== [{args.model}] category: {cat} ===")
-            ckpt = run_one_category(cat)
-            if ckpt is not None:
-                ckpts.append(ckpt)
-        # print all ckpts for convenience
-        print("\n".join(str(p) for p in ckpts))
-        return
+        logger.info(f"Fitting {self.model_name} - {dataset}/{category}")
 
-    # single category
-    ckpt = run_one_category(args.category)
-    if ckpt is None:
-        raise SystemExit(2)
-    print(str(ckpt))
+        model = self.get_model()
+        dm_kwargs = self.get_datamodule_kwargs()
+        datamodule = self.loader.get_datamodule(dataset, category, **dm_kwargs)
+        engine = self.get_engine()
 
+        engine.fit(datamodule=datamodule, model=model)
+        logger.info(f"Fitting {dataset}/{category} done")
 
-if __name__ == "__main__":
-    main()
+        return self
+
+    def predict(self, dataset: str, category: str, save_json: bool = None):
+        logger.info(f"Predicting {self.model_name} - {dataset}/{category}")
+
+        model = self.get_model()
+        dm_kwargs = self.get_datamodule_kwargs()
+        datamodule = self.loader.get_datamodule(dataset, category, **dm_kwargs)
+        engine = self.get_engine()
+        ckpt_path = self.get_ckpt_path(dataset, category)
+
+        predictions = engine.predict(
+            datamodule=datamodule,
+            model=model,
+            ckpt_path=ckpt_path,
+        )
+
+        # save json
+        if save_json is None:
+            save_json = self.output_config.get("save_json", False)
+        if save_json:
+            self.save_predictions_json(predictions, dataset, category)
+
+        logger.info(f"Predicting {dataset}/{category} done - {len(predictions)} batches")
+        return predictions
+
+    def save_predictions_json(self, predictions, dataset: str, category: str):
+        output_dir = self.output_root / "predictions" / self.model_name / dataset / category
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        results = []
+        for batch in predictions:
+            for i in range(len(batch["image_path"])):
+                result = {
+                    "image_path": str(batch["image_path"][i]),
+                    "pred_score": float(batch["pred_score"][i]),
+                    "pred_label": int(batch["pred_label"][i]),
+                }
+
+                if "anomaly_map" in batch and batch["anomaly_map"] is not None:
+                    amap = batch["anomaly_map"][i]
+                    result["anomaly_map_shape"] = list(amap.shape)
+                    result["anomaly_map_max"] = float(amap.max())
+                    result["anomaly_map_mean"] = float(amap.mean())
+
+                results.append(result)
+
+        json_path = output_dir / "predictions.json"
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"Saved predictions JSON: {json_path}")
+
+    def fit_all(self):
+        for dataset, category, _ in self.loader.iter_all():
+            logger.info(f"[{dataset}/{category}]")
+            self.fit(dataset, category)
+
+    def predict_all(self, save_json: bool = None):
+        all_predictions = {}
+        for dataset, category, _ in self.loader.iter_all():
+            logger.info(f"[{dataset}/{category}]")
+            key = f"{dataset}/{category}"
+            all_predictions[key] = self.predict(dataset, category, save_json)
+        return all_predictions

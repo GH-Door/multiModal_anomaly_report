@@ -1,67 +1,39 @@
-paths:
-  data_root: ${MMAD_DATA_ROOT:-/Volumes/T7/Dataset/MMAD}
-  mmad_json: ${MMAD_JSON_PATH:-/Volumes/T7/Dataset/MMAD/mmad.json}
-  artifact_root: ${ARTIFACT_ROOT:-./outputs}
-  db_path: ${DB_PATH:-./outputs/results.sqlite3}
+# Data
+data:
+  root: datasets/MMAD
+  output_root: ./output
 
 # Anomaly Detection Model
 anomaly:
-  model: patchcore  # dummy | patchcore
-  dummy:
-    blur_ksize: 5
-    edge_low: 50
-    edge_high: 150
-  patchcore:
-    backbone: wide_resnet50_2
-    layers: [layer2, layer3]
-    image_size: [1024, 1024]
-    checkpoint_path: null
+  model: patchcore  # patchcore | winclip | efficientad
 
-# Data
-data:
-  normal_dir: null
-  test_dir: null
-  image_extensions: [".jpg", ".jpeg", ".png"]
+  patchcore:
+    backbone: null
+    layers: null
+    coreset_sampling_ratio: null
+
+  winclip:
+    class_name: null
+    k_shot: null
+    scales: null
+
+  efficientad:
+    model_size: null
+    teacher_out_channels: null
 
 # Training
 training:
-  output_dir: checkpoints
-  train_batch_size: 32
-  eval_batch_size: 32
-  epochs: 100
-  lr: 0.001
-  weight_decay: 0.0001
-  dropout: 0.2
-  num_workers: 4
-  early_stop: 10
-  scheduler:
-    enabled: true
-    type: cosine  # cosine | step
-    min_lr: 0.00001
-    step_size: 10
-    gamma: 0.1
+  train_batch_size: null
+  eval_batch_size: null
+  num_workers: null
+  max_epochs: null  # null -> model default
 
-# Checkpoint
-checkpoint:
-  save_best: true
-  save_last: true
-  monitor: val_loss
-  mode: min
+# Engine
+engine:
+  accelerator: cpu  # auto | cpu | gpu | mps # Mac은 cpu 권장 mps 호환성 문제 심함
+  enable_progress_bar: false
+  logger: false
 
-# MLLM (Report Generation)
-mllm:
-  client: echo  # echo | qwen_local | api_openai
-  echo:
-    language: ko
-    seed: 0
-
-# Report
-report:
-  schema_path: configs/report_schema.json
-
-# W&B
-wandb:
-  enabled: false
-  project: MMAD_Inspector
-  run_name: null
-  tags: []
+# Output
+output:
+  save_json: true
