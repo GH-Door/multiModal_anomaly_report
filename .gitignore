@@ -8,6 +8,8 @@ wandb/
 dataset/
 results/
 output/
+imagenette/
+pre_trained/
 
 # ===== Python =====
 __pycache__/

@@ -24,6 +24,7 @@ def setup_logger(
     # 로거 설정
     logger = logging.getLogger(name)
     logger.setLevel(getattr(logging, log_level.upper()))
+    logger.propagate = False  # root logger로 전파 방지 (중복 출력 방지)
 
     # 핸들러 중복 추가 방지
     if logger.hasHandlers():

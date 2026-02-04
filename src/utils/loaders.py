@@ -4,9 +4,13 @@ import pandas as pd
 import logging
 from pathlib import Path
 from typing import Any
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
+
+def load_env():
+    load_dotenv()
 
 def load_config(config_path: str) -> dict[str, Any]:
     """YAML 설정 파일 로드"""
