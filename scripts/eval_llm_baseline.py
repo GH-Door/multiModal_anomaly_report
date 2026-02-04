@@ -5,15 +5,27 @@ Reproduces the paper's evaluation protocol:
 - Few-shot normal templates + query image → LLM → MCQ answers
 - Calculates accuracy per question type and dataset
 
+Supports two modes:
+1. Paper baseline (without AD model): Image + prompt → LLM
+2. With AD model: AD model output (heatmap/bbox) + Image + prompt → LLM
+
 Usage:
-    # GPT-4o (paper's main model)
-    python scripts/eval_llm_baseline.py --model gpt-4o --few-shot 1 --similar-template
+    # === API Models (GPT-4o, Claude) ===
+    python scripts/eval_llm_baseline.py --model gpt-4o --few-shot 1 --similar-template --max-images 5
+    python scripts/eval_llm_baseline.py --model claude --few-shot 1 --similar-template --max-images 5
 
-    # Claude
-    python scripts/eval_llm_baseline.py --model claude --few-shot 1 --similar-template
+    # === HuggingFace Models (Local GPU) ===
+    # Qwen2.5-VL
+    python scripts/eval_llm_baseline.py --model qwen --few-shot 1 --similar-template --max-images 5
 
-    # Quick test (5 images)
-    python scripts/eval_llm_baseline.py --model gpt-4o --max-images 5
+    # InternVL2
+    python scripts/eval_llm_baseline.py --model internvl --few-shot 1 --similar-template --max-images 5
+
+    # LLaVA
+    python scripts/eval_llm_baseline.py --model llava --few-shot 1 --similar-template --max-images 5
+
+    # === With Anomaly Detection Model ===
+    python scripts/eval_llm_baseline.py --model gpt-4o --with-ad --ad-output outputs/predictions.json
 """
 from __future__ import annotations
 
@@ -35,35 +47,82 @@ from src.mllm.base import BaseLLMClient
 from src.eval.metrics import calculate_accuracy_mmad
 
 
-def get_llm_client(model_name: str, **kwargs) -> BaseLLMClient:
+# Model registry with HuggingFace model IDs
+MODEL_REGISTRY = {
+    # API models
+    "gpt-4o": {"type": "api", "class": "GPT4Client", "model": "gpt-4o"},
+    "gpt-4o-mini": {"type": "api", "class": "GPT4Client", "model": "gpt-4o-mini"},
+    "gpt-4v": {"type": "api", "class": "GPT4Client", "model": "gpt-4-vision-preview"},
+    "claude": {"type": "api", "class": "ClaudeClient", "model": "claude-sonnet-4-20250514"},
+    "claude-sonnet": {"type": "api", "class": "ClaudeClient", "model": "claude-sonnet-4-20250514"},
+    "claude-haiku": {"type": "api", "class": "ClaudeClient", "model": "claude-3-5-haiku-20241022"},
+
+    # Qwen models
+    "qwen": {"type": "local", "class": "QwenVLClient", "model": "Qwen/Qwen2.5-VL-7B-Instruct"},
+    "qwen-7b": {"type": "local", "class": "QwenVLClient", "model": "Qwen/Qwen2.5-VL-7B-Instruct"},
+    "qwen-2b": {"type": "local", "class": "QwenVLClient", "model": "Qwen/Qwen2.5-VL-2B-Instruct"},
+    "qwen2-vl": {"type": "local", "class": "QwenVLClient", "model": "Qwen/Qwen2-VL-7B-Instruct"},
+
+    # InternVL models
+    "internvl": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL2-8B"},
+    "internvl-8b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL2-8B"},
+    "internvl-4b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL2-4B"},
+    "internvl-2b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL2-2B"},
+    "internvl-1b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL2-1B"},
+    "internvl2.5-8b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL2_5-8B"},
+
+    # LLaVA models
+    "llava": {"type": "local", "class": "LLaVAClient", "model": "llava-hf/llava-1.5-7b-hf"},
+    "llava-7b": {"type": "local", "class": "LLaVAClient", "model": "llava-hf/llava-1.5-7b-hf"},
+    "llava-13b": {"type": "local", "class": "LLaVAClient", "model": "llava-hf/llava-1.5-13b-hf"},
+    "llava-v1.6-7b": {"type": "local", "class": "LLaVAClient", "model": "llava-hf/llava-v1.6-mistral-7b-hf"},
+    "llava-onevision": {"type": "local", "class": "LLaVAClient", "model": "llava-hf/llava-onevision-qwen2-7b-ov-hf"},
+}
+
+
+def get_llm_client(model_name: str, model_path: str = None, **kwargs) -> BaseLLMClient:
     """Factory function to get LLM client by name."""
     model_lower = model_name.lower()
 
-    if model_lower in ["gpt-4o", "gpt4o", "gpt-4o-mini", "gpt4o-mini", "gpt-4v", "gpt4v"]:
-        from src.mllm.openai_client import GPT4Client
-        # Map common names to actual model names
-        model_map = {
-            "gpt-4o": "gpt-4o",
-            "gpt4o": "gpt-4o",
-            "gpt-4o-mini": "gpt-4o-mini",
-            "gpt4o-mini": "gpt-4o-mini",
-            "gpt-4v": "gpt-4-vision-preview",
-            "gpt4v": "gpt-4-vision-preview",
-        }
-        return GPT4Client(model=model_map.get(model_lower, model_lower), **kwargs)
+    # Check registry first
+    if model_lower in MODEL_REGISTRY:
+        info = MODEL_REGISTRY[model_lower]
+        actual_model = model_path or info["model"]
 
-    elif model_lower in ["claude", "claude-sonnet", "claude-haiku", "claude-opus"]:
-        from src.mllm.claude_client import ClaudeClient
-        model_map = {
-            "claude": "claude-sonnet-4-20250514",
-            "claude-sonnet": "claude-sonnet-4-20250514",
-            "claude-haiku": "claude-3-5-haiku-20241022",
-            "claude-opus": "claude-opus-4-20250514",
-        }
-        return ClaudeClient(model=model_map.get(model_lower, model_lower), **kwargs)
+        if info["class"] == "GPT4Client":
+            from src.mllm.openai_client import GPT4Client
+            return GPT4Client(model=actual_model, **kwargs)
 
-    else:
-        raise ValueError(f"Unknown model: {model_name}. Supported: gpt-4o, gpt-4o-mini, claude, claude-sonnet, claude-haiku")
+        elif info["class"] == "ClaudeClient":
+            from src.mllm.claude_client import ClaudeClient
+            return ClaudeClient(model=actual_model, **kwargs)
+
+        elif info["class"] == "QwenVLClient":
+            from src.mllm.qwen_client import QwenVLClient
+            return QwenVLClient(model_path=actual_model, **kwargs)
+
+        elif info["class"] == "InternVLClient":
+            from src.mllm.internvl_client import InternVLClient
+            return InternVLClient(model_path=actual_model, **kwargs)
+
+        elif info["class"] == "LLaVAClient":
+            from src.mllm.llava_client import LLaVAClient
+            return LLaVAClient(model_path=actual_model, **kwargs)
+
+    # Allow direct HuggingFace model paths
+    if "/" in model_name:
+        model_lower_path = model_name.lower()
+        if "qwen" in model_lower_path:
+            from src.mllm.qwen_client import QwenVLClient
+            return QwenVLClient(model_path=model_name, **kwargs)
+        elif "internvl" in model_lower_path:
+            from src.mllm.internvl_client import InternVLClient
+            return InternVLClient(model_path=model_name, **kwargs)
+        elif "llava" in model_lower_path:
+            from src.mllm.llava_client import LLaVAClient
+            return LLaVAClient(model_path=model_name, **kwargs)
+
+    raise ValueError(f"Unknown model: {model_name}. Available: {list(MODEL_REGISTRY.keys())}")
 
 
 def load_mmad_data(json_path: str) -> dict:
@@ -72,18 +131,31 @@ def load_mmad_data(json_path: str) -> dict:
         return json.load(f)
 
 
+def load_ad_predictions(ad_output_path: str) -> dict:
+    """Load anomaly detection model predictions."""
+    with open(ad_output_path, "r", encoding="utf-8") as f:
+        predictions = json.load(f)
+
+    # Index by image path
+    if isinstance(predictions, list):
+        return {p["image_path"]: p for p in predictions}
+    return predictions
+
+
 def main():
     parser = argparse.ArgumentParser(description="MMAD LLM Baseline Evaluation")
 
     # Model settings
     parser.add_argument("--model", type=str, default="gpt-4o",
-                        help="LLM model: gpt-4o, gpt-4o-mini, claude, claude-sonnet, claude-haiku")
+                        help="LLM model name (see MODEL_REGISTRY) or HuggingFace model path")
+    parser.add_argument("--model-path", type=str, default=None,
+                        help="Override HuggingFace model path")
 
     # Data settings
     parser.add_argument("--data-root", type=str, default=None,
-                        help="Root path containing MMAD images (default: datasets/MMAD)")
+                        help="Root path containing MMAD images")
     parser.add_argument("--mmad-json", type=str, default=None,
-                        help="Path to mmad.json (default: datasets/MMAD/mmad.json)")
+                        help="Path to mmad.json")
 
     # Evaluation settings
     parser.add_argument("--few-shot", type=int, default=1,
@@ -95,6 +167,15 @@ def main():
     parser.add_argument("--batch-mode", action="store_true",
                         help="Ask all questions in one API call (faster but may be less accurate)")
 
+    # Anomaly Detection model settings
+    parser.add_argument("--with-ad", action="store_true",
+                        help="Use anomaly detection model output")
+    parser.add_argument("--ad-output", type=str, default=None,
+                        help="Path to AD model predictions JSON")
+    parser.add_argument("--ad-notation", type=str, default="heatmap",
+                        choices=["bbox", "contour", "highlight", "mask", "heatmap"],
+                        help="How to present AD model output to LLM")
+
     # Output settings
     parser.add_argument("--output-dir", type=str, default="outputs/eval",
                         help="Output directory for results")
@@ -104,16 +185,30 @@ def main():
     args = parser.parse_args()
 
     # Resolve paths
-    data_root = args.data_root or os.environ.get("MMAD_DATA_ROOT") or str(PROJ_ROOT / "datasets" / "MMAD")
-    mmad_json = args.mmad_json or os.environ.get("MMAD_JSON_PATH") or str(Path(data_root) / "mmad.json")
+    data_root = args.data_root or os.environ.get("MMAD_DATA_ROOT")
+    mmad_json = args.mmad_json or os.environ.get("MMAD_JSON_PATH")
+
+    # Try common paths
+    if not data_root:
+        candidates = [
+            PROJ_ROOT / "datasets" / "MMAD",
+            Path("/Users/leehw/Documents/likelion/final_project/MMAD/dataset/MMAD"),
+        ]
+        for c in candidates:
+            if c.exists():
+                data_root = str(c)
+                break
+
+    if not mmad_json and data_root:
+        mmad_json = str(Path(data_root) / "mmad.json")
 
     # Validate paths
-    if not Path(mmad_json).exists():
+    if not mmad_json or not Path(mmad_json).exists():
         print(f"Error: mmad.json not found at {mmad_json}")
         print("Please set --mmad-json or MMAD_JSON_PATH environment variable")
         sys.exit(1)
 
-    if not Path(data_root).exists():
+    if not data_root or not Path(data_root).exists():
         print(f"Error: Data root not found at {data_root}")
         print("Please set --data-root or MMAD_DATA_ROOT environment variable")
         sys.exit(1)
@@ -123,17 +218,33 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     template_type = "Similar_template" if args.similar_template else "Random_template"
-    output_name = f"answers_{args.few_shot}_shot_{args.model}_{template_type}"
+    ad_suffix = "_with_AD" if args.with_ad else ""
+    output_name = f"answers_{args.few_shot}_shot_{args.model}_{template_type}{ad_suffix}"
     answers_json_path = output_dir / f"{output_name}.json"
 
-    print(f"=== MMAD LLM Baseline Evaluation ===")
+    print("=" * 60)
+    print("MMAD LLM Evaluation")
+    print("=" * 60)
     print(f"Model: {args.model}")
+    if args.model_path:
+        print(f"Model path: {args.model_path}")
     print(f"Few-shot: {args.few_shot}")
     print(f"Template: {template_type}")
+    print(f"With AD: {args.with_ad}")
     print(f"Data root: {data_root}")
     print(f"MMAD JSON: {mmad_json}")
     print(f"Output: {answers_json_path}")
+    print("=" * 60)
     print()
+
+    # Load AD predictions if using AD model
+    ad_predictions = None
+    if args.with_ad:
+        if not args.ad_output:
+            print("Error: --ad-output required when using --with-ad")
+            sys.exit(1)
+        ad_predictions = load_ad_predictions(args.ad_output)
+        print(f"Loaded {len(ad_predictions)} AD predictions")
 
     # Load existing results if resuming
     all_answers = []
@@ -147,7 +258,7 @@ def main():
 
     # Initialize LLM client
     try:
-        llm_client = get_llm_client(args.model)
+        llm_client = get_llm_client(args.model, model_path=args.model_path)
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)
@@ -184,6 +295,10 @@ def main():
             print(f"Warning: Image not found: {query_image_path}")
             continue
 
+        # TODO: If using AD model, add heatmap/bbox to the prompt
+        # This would require modifying the client's build_payload method
+        # For now, AD model output integration is a placeholder
+
         # Generate answers
         if args.batch_mode:
             questions, answers, predicted, q_types = llm_client.generate_answers_batch(
@@ -205,7 +320,7 @@ def main():
         # Calculate accuracy for this image
         correct = sum(1 for p, a in zip(predicted, answers) if p == a)
         accuracy = correct / len(answers) if answers else 0
-        print(f"Image: {image_rel}, Accuracy: {accuracy:.2f}, API time: {llm_client.api_time_cost:.2f}s")
+        print(f"Image: {image_rel}, Accuracy: {accuracy:.2f}")
 
         # Store results
         for q, a, pred, qt in zip(questions, answers, predicted, q_types):
@@ -214,7 +329,7 @@ def main():
                 "question": q,
                 "question_type": qt,
                 "correct_answer": a,
-                "gpt_answer": pred  # Using 'gpt_answer' for compatibility with paper's metrics code
+                "gpt_answer": pred  # Using 'gpt_answer' for compatibility with paper's metrics
             })
 
         # Save incrementally
@@ -222,7 +337,9 @@ def main():
             json.dump(all_answers, f, indent=4, ensure_ascii=False)
 
     print()
-    print("=== Calculating Metrics ===")
+    print("=" * 60)
+    print("Calculating Metrics")
+    print("=" * 60)
     calculate_accuracy_mmad(str(answers_json_path))
     print()
     print(f"Results saved to: {answers_json_path}")

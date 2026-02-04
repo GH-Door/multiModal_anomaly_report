@@ -6,13 +6,41 @@ __all__ = [
     "EchoMLLM",
     "BaseLLMClient",
     "INSTRUCTION",
+    # Lazy-loaded clients
+    "get_gpt4_client",
+    "get_claude_client",
+    "get_qwen_client",
+    "get_internvl_client",
+    "get_llava_client",
 ]
+
 
 # Lazy imports for API clients (avoid import errors if dependencies not installed)
 def get_gpt4_client(*args, **kwargs):
+    """Get GPT-4o/GPT-4V client."""
     from .openai_client import GPT4Client
     return GPT4Client(*args, **kwargs)
 
+
 def get_claude_client(*args, **kwargs):
+    """Get Claude client."""
     from .claude_client import ClaudeClient
     return ClaudeClient(*args, **kwargs)
+
+
+def get_qwen_client(*args, **kwargs):
+    """Get Qwen2.5-VL client (requires transformers, qwen-vl-utils)."""
+    from .qwen_client import QwenVLClient
+    return QwenVLClient(*args, **kwargs)
+
+
+def get_internvl_client(*args, **kwargs):
+    """Get InternVL2 client (requires transformers)."""
+    from .internvl_client import InternVLClient
+    return InternVLClient(*args, **kwargs)
+
+
+def get_llava_client(*args, **kwargs):
+    """Get LLaVA client (requires transformers or llava package)."""
+    from .llava_client import LLaVAClient
+    return LLaVAClient(*args, **kwargs)
