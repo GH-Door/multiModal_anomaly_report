@@ -325,9 +325,12 @@ class PatchCore(nn.Module):
 
         if save_onnx:
             onnx_path = save_path / "model.onnx"
-            self._export_onnx(onnx_path, image_size)
-            saved_paths["onnx"] = str(onnx_path)
-            print(f"Saved ONNX model: {onnx_path}")
+            try:
+                self._export_onnx(onnx_path, image_size)
+                saved_paths["onnx"] = str(onnx_path)
+                print(f"Saved ONNX model: {onnx_path}")
+            except Exception as e:
+                print(f"ONNX export failed (PT saved successfully): {e}")
 
         return saved_paths
 
@@ -350,12 +353,12 @@ class PatchCore(nn.Module):
         device = self.memory_bank.device
         dummy_input = torch.randn(1, 3, image_size, image_size).to(device)
 
-        # Export
+        # Export with opset 11 for better compatibility
         torch.onnx.export(
             wrapper,
             dummy_input,
             str(path),
-            opset_version=14,
+            opset_version=11,
             input_names=["input"],
             output_names=["anomaly_score", "anomaly_map"],
             dynamic_axes={
@@ -363,6 +366,7 @@ class PatchCore(nn.Module):
                 "anomaly_score": {0: "batch_size"},
                 "anomaly_map": {0: "batch_size"},
             },
+            do_constant_folding=True,
         )
 
     @classmethod
