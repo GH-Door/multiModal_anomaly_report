@@ -265,12 +265,33 @@ class Anomalibs:
 
         logger.info(f"Fitting {self.model_name} - {dataset}/{category}")
 
+        # --- Resume logic based on config ---
+        resume_training = self.training_config.get("resume", False)
+        ckpt_path_to_use = None
+
+        if resume_training:
+            # If resuming, check if checkpoint exists
+            potential_ckpt_path = self.get_ckpt_path(dataset, category)
+            if potential_ckpt_path and potential_ckpt_path.exists():
+                ckpt_path_to_use = str(potential_ckpt_path)
+                logger.info(f"Resume is true. Found checkpoint, resuming from: {ckpt_path_to_use}")
+            else:
+                logger.info("Resume is true, but no checkpoint found. Starting new training.")
+        else:
+            # If not resuming, delete old directory to ensure a fresh start
+            import shutil
+            model_dir_name = self.MODEL_DIR_MAP.get(self.model_name, self.model_name.capitalize())
+            output_dir_to_clear = self.output_root / model_dir_name / dataset / category
+            if output_dir_to_clear.exists():
+                logger.info(f"Resume is false. Deleting old directory to start fresh: {output_dir_to_clear}")
+                shutil.rmtree(output_dir_to_clear)
+
         model = self.get_model()
         dm_kwargs = self.get_datamodule_kwargs()
         datamodule = self.loader.get_datamodule(dataset, category, **dm_kwargs)
         engine = self.get_engine(dataset, category, model=model, datamodule=datamodule)
-        ckpt_path = self.get_ckpt_path(dataset, category)
-        engine.fit(datamodule=datamodule, model=model, ckpt_path=str(ckpt_path) if ckpt_path else None)
+        
+        engine.fit(datamodule=datamodule, model=model, ckpt_path=ckpt_path_to_use)
 
         # WandB run 종료 (카테고리별로 별도 run)
         import wandb
