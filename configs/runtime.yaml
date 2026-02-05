@@ -2,12 +2,12 @@
 
 # Data
 data:
-  root: datasets/MMAD
+  root: dataset/MMAD
   output_root: ./output
 
 # Anomaly Detection Model
 anomaly:
-  model: efficientad  # patchcore | winclip | efficientad
+  model: patchcore  # patchcore | winclip | efficientad
 
   patchcore:
     backbone: null
@@ -28,14 +28,15 @@ anomaly:
 
 # Training
 training:
+  resume: false # true로 설정 시, 가능한 경우 이전 학습을 이어감
   train_batch_size: null
   eval_batch_size: null
   num_workers: 0 # Colab A100 기준 4~10 권장
-  max_epochs: 30  # EfficientAd는 빠른 수렴, 부족하면 추가 학습 가능
+  max_epochs: Null  # EfficientAd는 빠른 수렴, 부족하면 추가 학습 가능
 
 # Engine
 engine:
-  accelerator: cpu  # auto | cpu | gpu | mps # Mac은 cpu 권장 mps 호환성 문제 심함
+  accelerator: auto  # auto | cpu | gpu | mps # Mac은 cpu 권장 mps 호환성 문제 심함
   enable_progress_bar: false  # true면 Colab에서 tqdm/rich 충돌로 RecursionError 발생
   logger: wandb  # false | wandb
 
