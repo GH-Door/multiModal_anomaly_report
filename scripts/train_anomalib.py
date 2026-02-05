@@ -17,9 +17,15 @@ tqdm.tqdm = tqdm_class
 import json
 import time
 from pathlib import Path
+
+import torch
 from anomalib.models import Patchcore, WinClip, EfficientAd
+from anomalib.models.image.efficient_ad.torch_model import EfficientAdModelSize
 from anomalib.engine import Engine
 from pytorch_lightning.callbacks import Callback
+
+# PyTorch 2.6+ weights_only=True 대응: Anomalib 클래스 허용
+torch.serialization.add_safe_globals([EfficientAdModelSize])
 
 from src.utils.loaders import load_config
 from src.utils.log import setup_logger
@@ -111,48 +117,106 @@ class Anomalibs:
             kwargs["num_workers"] = self.training_config["num_workers"]
         return kwargs
 
-    def get_engine(self, dataset: str = None, category: str = None, model=None, datamodule=None):
-        # WandB logger 설정
+    def get_engine(self, dataset: str = None, category: str = None, model=None, datamodule=None, stage: str = None):
+        # Import necessary callbacks
+        from pytorch_lightning.callbacks import ModelCheckpoint
+
+        # WandB logger 설정 (predict 시에는 비활성화)
         logger_config = self.engine_config.get("logger", False)
-        if logger_config == "wandb" and dataset and category:
-            from pytorch_lightning.loggers import WandbLogger
-            from src.utils.wandbs import login_wandb
-            login_wandb()
-            import torch
-            gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+        if logger_config == "wandb":
+            if stage == "predict" or not (dataset and category):
+                # predict 또는 dataset/category 없으면 wandb 비활성화
+                logger_config = False
+            else:
+                from pytorch_lightning.loggers import WandbLogger
+                from src.utils.wandbs import login_wandb
+                login_wandb()
+                import torch
+                gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
 
-            # batch_size 추출
-            batch_size = self.training_config.get("train_batch_size")
-            if batch_size is None and datamodule is not None:
-                batch_size = getattr(datamodule, "train_batch_size", None)
-            if batch_size is None:
-                batch_size = 1 if self.model_name == "efficientad" else 32
+                # batch_size 추출
+                batch_size = self.training_config.get("train_batch_size")
+                if batch_size is None and datamodule is not None:
+                    batch_size = getattr(datamodule, "train_batch_size", None)
+                if batch_size is None:
+                    batch_size = 1 if self.model_name == "efficientad" else 32
 
-            # max_epochs 추출
-            max_epochs = self.training_config.get("max_epochs") or 100
+                # max_epochs 추출
+                max_epochs = self.training_config.get("max_epochs") or 100
 
-            # model hyperparams
-            lr = getattr(model, "lr", None) if model else None
-            weight_decay = getattr(model, "weight_decay", None) if model else None
+                # model hyperparams
+                lr = getattr(model, "lr", None) if model else None
+                weight_decay = getattr(model, "weight_decay", None) if model else None
 
-            logger_config = WandbLogger(
-                project=self.config.get("wandb", {}).get("project", "mmad-anomaly"),
-                name=f"{dataset}-{category}",
-                tags=[self.model_name, dataset, category],
-                config={
-                    "model": self.model_name,
-                    "dataset": dataset,
-                    "category": category,
-                    "device": gpu_name,
-                    "batch_size": batch_size,
-                    "epoch": max_epochs,
-                    "lr": lr,
-                    "weight_decay": weight_decay,
-                },
-            )
+                logger_config = WandbLogger(
+                    project=self.config.get("wandb", {}).get("project", "mmad-anomaly"),
+                    name=f"{dataset}-{category}",
+                    tags=[self.model_name, dataset, category],
+                    config={
+                        "model": self.model_name,
+                        "dataset": dataset,
+                        "category": category,
+                        "device": gpu_name,
+                        "batch_size": batch_size,
+                        "epoch": max_epochs,
+                        "lr": lr,
+                        "weight_decay": weight_decay,
+                    },
+                )
 
         enable_progress = self.engine_config.get("enable_progress_bar", False)
         callbacks = [] if enable_progress else [EpochProgressCallback()]
+
+        # --- Custom Callbacks for Checkpoint and Visualizer ---
+
+        # 1. ModelCheckpoint Callback (for simplified path)
+        if dataset and category: # Only add if dataset and category are available for path
+            checkpoint_dir = (
+                self.output_root
+                / self.MODEL_DIR_MAP.get(self.model_name, self.model_name.capitalize())
+                / dataset
+                / category
+                / "v0" # Version folder
+            )
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+            model_checkpoint_callback = ModelCheckpoint(
+                dirpath=str(checkpoint_dir),
+                filename="model", # Saves as model.ckpt
+                save_last=True,
+                save_top_k=1,
+                monitor="image_AUROC", # Assuming this is a common metric to monitor
+                mode="max",
+            )
+            callbacks.append(model_checkpoint_callback)
+        # If dataset/category not available, default ModelCheckpoint might still be added by Anomalib.
+        # Or, if this is a predict-only scenario without training, no checkpoint is needed.
+
+        # Visualizer Callback (yaml에서 visualizer: true일 때만)
+        visualizer_enabled = self.model_params.get("visualizer", False)
+        if visualizer_enabled and stage == "predict" and dataset and category:
+            try:
+                # Anomalib 버전에 따라 import 경로가 다름
+                try:
+                    from anomalib.callbacks import ImageVisualizerCallback as VisualizerCallback
+                except ImportError:
+                    try:
+                        from anomalib.utils.callbacks import ImageVisualizerCallback as VisualizerCallback
+                    except ImportError:
+                        VisualizerCallback = None
+
+                if VisualizerCallback:
+                    image_save_path = (
+                        self.output_root
+                        / self.MODEL_DIR_MAP.get(self.model_name, self.model_name.capitalize())
+                        / dataset
+                        / category
+                        / "predictions"
+                    )
+                    image_save_path.mkdir(parents=True, exist_ok=True)
+                    callbacks.append(VisualizerCallback(image_save_path=str(image_save_path)))
+            except Exception as e:
+                logger.warning(f"Visualizer callback not available: {e}")
 
         kwargs = {
             "accelerator": self.engine_config.get("accelerator", "auto"),
@@ -167,15 +231,28 @@ class Anomalibs:
             kwargs["max_epochs"] = self.training_config["max_epochs"]
         return Engine(**kwargs)
 
+    # Anomalib이 저장하는 실제 폴더명 매핑
+    MODEL_DIR_MAP = {
+        "patchcore": "Patchcore",
+        "winclip": "WinClip",
+        "efficientad": "EfficientAd",
+    }
+
     def get_ckpt_path(self, dataset: str, category: str) -> Path | None:
         if self.model_name == "winclip":
             return None
+
+        model_dir = self.MODEL_DIR_MAP.get(self.model_name, self.model_name.capitalize())
+
+        # Simplified checkpoint path as per user's request:
+        # output/model_name/dataset/category/v0/model.ckpt
         return (
             self.output_root
-            / self.model_name.capitalize()
+            / model_dir
             / dataset
             / category
-            / "v0/weights/lightning/model.ckpt"
+            / "v0"
+            / "model.ckpt"
         )
 
     def requires_fit(self) -> bool:
@@ -192,8 +269,8 @@ class Anomalibs:
         dm_kwargs = self.get_datamodule_kwargs()
         datamodule = self.loader.get_datamodule(dataset, category, **dm_kwargs)
         engine = self.get_engine(dataset, category, model=model, datamodule=datamodule)
-
-        engine.fit(datamodule=datamodule, model=model)
+        ckpt_path = self.get_ckpt_path(dataset, category)
+        engine.fit(datamodule=datamodule, model=model, ckpt_path=str(ckpt_path) if ckpt_path else None)
 
         # WandB run 종료 (카테고리별로 별도 run)
         import wandb
@@ -201,7 +278,6 @@ class Anomalibs:
             wandb.finish()
 
         logger.info(f"Fitting {dataset}/{category} done")
-
         return self
 
     def predict(self, dataset: str, category: str, save_json: bool = None):
@@ -209,8 +285,9 @@ class Anomalibs:
 
         model = self.get_model()
         dm_kwargs = self.get_datamodule_kwargs()
+        dm_kwargs["include_mask"] = True  # predict 시 GT mask 포함
         datamodule = self.loader.get_datamodule(dataset, category, **dm_kwargs)
-        engine = self.get_engine()
+        engine = self.get_engine(dataset, category, model=model, datamodule=datamodule, stage="predict")
         ckpt_path = self.get_ckpt_path(dataset, category)
 
         # WinCLIP requires class name for text embeddings
@@ -297,12 +374,34 @@ class Anomalibs:
         logger.info(f"Saved predictions JSON: {json_path}")
 
     def get_all_categories(self) -> list[tuple[str, str]]:
-        """Get list of (dataset, category) tuples."""
+        """Get list of (dataset, category) tuples from DATASETS."""
         return [
             (dataset, category)
             for dataset in self.loader.DATASETS
             for category in self.loader.get_categories(dataset)
         ]
+
+    def get_trained_categories(self) -> list[tuple[str, str]]:
+        """Get list of (dataset, category) tuples that have trained checkpoints."""
+        model_dir = self.MODEL_DIR_MAP.get(self.model_name, self.model_name.capitalize())
+        model_path = self.output_root / model_dir
+
+        if not model_path.exists():
+            return []
+
+        trained = []
+        for dataset_dir in sorted(model_path.iterdir()):
+            if not dataset_dir.is_dir():
+                continue
+            dataset = dataset_dir.name
+            for category_dir in sorted(dataset_dir.iterdir()):
+                if not category_dir.is_dir():
+                    continue
+                category = category_dir.name
+                ckpt = category_dir / "v0/model.ckpt"
+                if ckpt.exists():
+                    trained.append((dataset, category))
+        return trained
 
     def fit_all(self):
         categories = self.get_all_categories()
@@ -310,27 +409,35 @@ class Anomalibs:
         logger.info(f"Starting fit_all: {total} categories")
 
         for idx, (dataset, category) in enumerate(categories, 1):
-            print(f"\n[{idx}/{total}] Training: {category}...")
+            msg_start = f"[{idx}/{total}] Training: {dataset}/{category}..."
+            print(f"\n{msg_start}")
+            logger.info(msg_start)
             start = time.time()
             self.fit(dataset, category)
             elapsed = time.time() - start
-            print(f"✓ [{idx}/{total}] {category} 완료 ({elapsed:.1f}s)")
+            msg_done = f"[{idx}/{total}] {dataset}/{category} done ({elapsed:.1f}s)"
+            print(f"✓ {msg_done}")
+            logger.info(msg_done)
 
         logger.info(f"fit_all completed: {total} categories")
 
     def predict_all(self, save_json: bool = None):
-        categories = self.get_all_categories()
+        categories = self.get_trained_categories()
         total = len(categories)
-        logger.info(f"Starting predict_all: {total} categories")
+        logger.info(f"Starting predict_all: {total} trained categories")
 
         all_predictions = {}
         for idx, (dataset, category) in enumerate(categories, 1):
-            print(f"\n[{idx}/{total}] Inference: {category}...")
+            msg_start = f"[{idx}/{total}] Inference: {dataset}/{category}..."
+            print(f"\n{msg_start}")
+            logger.info(msg_start)
             start = time.time()
             key = f"{dataset}/{category}"
             all_predictions[key] = self.predict(dataset, category, save_json)
             elapsed = time.time() - start
-            print(f"✓ [{idx}/{total}] {category} 완료 ({elapsed:.1f}s)")
+            msg_done = f"[{idx}/{total}] {dataset}/{category} done ({elapsed:.1f}s)"
+            print(f"✓ {msg_done}")
+            logger.info(msg_done)
 
         logger.info(f"predict_all completed: {total} categories")
         return all_predictions
