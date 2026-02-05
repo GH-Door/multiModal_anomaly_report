@@ -298,11 +298,13 @@ def main():
             # Get valid images only
             valid_indices = torch.where(valid_mask)[0]
             images = batch["image"][valid_indices]
-            original_sizes = [batch["original_size"][i] for i in valid_indices.tolist()]
-            original_sizes = [(int(h), int(w)) for h, w in zip(
-                [s[0] for s in original_sizes],
-                [s[1] for s in original_sizes]
-            )]
+
+            # original_size는 DataLoader가 (heights_tensor, widths_tensor)로 collate함
+            heights, widths = batch["original_size"]
+            original_sizes = [
+                (int(heights[i]), int(widths[i]))
+                for i in valid_indices.tolist()
+            ]
 
             # Process batch
             try:
