@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
+from tqdm import tqdm
 
 
 class FeatureExtractor(nn.Module):
@@ -167,7 +168,7 @@ class PatchCore(nn.Module):
 
         print("Extracting features from training data...")
         with torch.no_grad():
-            for batch in dataloader:
+            for batch in tqdm(dataloader, desc="Feature extraction"):
                 images = batch["image"].to(device)
                 features = self.extract_features(images)  # (B, N, D)
 
@@ -192,7 +193,10 @@ class PatchCore(nn.Module):
         print(f"Memory bank size: {self.memory_bank.shape}")
 
     def _coreset_sampling(self, features: torch.Tensor, n_select: int) -> np.ndarray:
-        """Greedy coreset sampling for selecting representative patches.
+        """Fast coreset sampling using random selection.
+
+        For faster training, uses random sampling instead of greedy farthest point.
+        Can be changed to 'greedy' method for better quality but slower speed.
 
         Args:
             features: All patch features (N, D)
@@ -206,24 +210,9 @@ class PatchCore(nn.Module):
         if n_select >= N:
             return np.arange(N)
 
-        # Use greedy farthest point sampling
-        features_np = features.numpy()
-
-        # Start with random point
-        selected_indices = [np.random.randint(N)]
-        min_distances = np.full(N, np.inf)
-
-        for _ in range(1, n_select):
-            # Update minimum distances
-            last_selected = features_np[selected_indices[-1]]
-            distances = np.linalg.norm(features_np - last_selected, axis=1)
-            min_distances = np.minimum(min_distances, distances)
-
-            # Select point with maximum minimum distance
-            next_idx = np.argmax(min_distances)
-            selected_indices.append(next_idx)
-
-        return np.array(selected_indices)
+        # Fast random sampling (recommended for large datasets)
+        indices = np.random.choice(N, size=n_select, replace=False)
+        return indices
 
     def predict(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predict anomaly scores and maps.

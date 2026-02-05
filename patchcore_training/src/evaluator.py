@@ -108,7 +108,7 @@ class PatchCoreEvaluator:
         all_masks = []
 
         with torch.no_grad():
-            for batch in tqdm(dataloader, desc="Evaluating", disable=not verbose):
+            for batch in tqdm(dataloader, desc=f"  {dataset_name}/{category}", leave=False):
                 images = batch["image"].to(self.device)
                 labels = batch["label"].numpy()
                 masks = batch["mask"].numpy()
@@ -228,8 +228,9 @@ class PatchCoreEvaluator:
 
         print(f"\nEvaluating {total} models")
 
-        for idx, (key, model) in enumerate(models.items(), 1):
-            print(f"\n[{idx}/{total}] {key}")
+        pbar = tqdm(models.items(), desc="Evaluating", total=total)
+        for key, model in pbar:
+            pbar.set_description(f"Evaluating {key}")
 
             parts = key.split("/")
             dataset_name, category = parts[0], parts[1]
@@ -238,10 +239,14 @@ class PatchCoreEvaluator:
                 model=model,
                 dataset_name=dataset_name,
                 category=category,
-                verbose=verbose,
+                verbose=False,  # Suppress individual category output for cleaner progress
             )
 
             results[key] = metrics
+
+            # Show AUROC in progress bar
+            auroc = metrics.get('image_auroc', 0)
+            pbar.set_postfix({"AUROC": f"{auroc:.4f}"})
 
         # Compute average metrics
         if results:

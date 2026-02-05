@@ -154,8 +154,9 @@ class PatchCoreTrainer:
         print(f"Checkpoint dir: {self.checkpoint_dir}")
 
         models = {}
-        for idx, (dataset_name, category) in enumerate(categories, 1):
-            print(f"\n[{idx}/{total}] {dataset_name}/{category}")
+        pbar = tqdm(categories, desc="Training categories")
+        for dataset_name, category in pbar:
+            pbar.set_description(f"Training {dataset_name}/{category}")
 
             model = self.train_category(dataset_name, category, verbose=verbose)
 
@@ -195,12 +196,11 @@ class PatchCoreTrainer:
         models = {}
         categories = self.get_dataset_categories()
 
-        for dataset_name, category in categories:
+        for dataset_name, category in tqdm(categories, desc="Loading models"):
             model = self.load_model(dataset_name, category)
             if model is not None:
                 key = f"{dataset_name}/{category}"
                 models[key] = model
-                print(f"Loaded: {key}")
 
         print(f"Loaded {len(models)} models")
         return models

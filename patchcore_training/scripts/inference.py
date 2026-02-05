@@ -96,21 +96,22 @@ def load_models(config: Dict, device: torch.device) -> Dict[str, PatchCore]:
     checkpoint_dir = Path(config["output"]["checkpoint_dir"])
     datasets_config = config["data"].get("datasets", {})
 
+    # Count total categories
+    all_categories = [(d, c) for d, cats in datasets_config.items() for c in cats]
+
     models = {}
 
-    for dataset_name, categories in datasets_config.items():
-        for category in categories:
-            pt_path = checkpoint_dir / dataset_name / category / "model.pt"
+    for dataset_name, category in tqdm(all_categories, desc="Loading models"):
+        pt_path = checkpoint_dir / dataset_name / category / "model.pt"
 
-            if pt_path.exists():
-                model = PatchCore.load(str(pt_path), device)
-                model.eval()
-                key = f"{dataset_name}/{category}"
-                models[key] = model
-                print(f"Loaded: {key}")
-            else:
-                print(f"Model not found: {dataset_name}/{category}")
+        if pt_path.exists():
+            model = PatchCore.load(str(pt_path), device)
+            model.eval()
+            key = f"{dataset_name}/{category}"
+            models[key] = model
+        # Silently skip missing models (will be reported during inference)
 
+    print(f"Loaded {len(models)}/{len(all_categories)} models")
     return models
 
 
@@ -260,16 +261,17 @@ def main():
     print("Running inference")
     print(f"{'='*60}")
 
-    for category_key, paths in images_by_category.items():
+    category_pbar = tqdm(images_by_category.items(), desc="Categories", position=0)
+    for category_key, paths in category_pbar:
         if category_key not in models:
             skipped += len(paths)
-            print(f"Skipping {category_key} (no model)")
+            category_pbar.set_postfix({"status": "skipped (no model)"})
             continue
 
         model = models[category_key]
         dataset_name, category = category_key.split("/")
 
-        print(f"\nProcessing: {category_key} ({len(paths)} images)")
+        category_pbar.set_description(f"Processing {category_key}")
 
         # Create dataset and dataloader
         dataset = InferenceDataset(
@@ -286,7 +288,7 @@ def main():
             pin_memory=True,
         )
 
-        for batch in tqdm(dataloader, desc=f"{category_key}"):
+        for batch in tqdm(dataloader, desc=f"  {category_key}", position=1, leave=False):
             valid_mask = batch["valid"]
 
             if not valid_mask.any():
@@ -330,6 +332,8 @@ def main():
             # Handle invalid images
             invalid_count = (~valid_mask).sum().item()
             errors += invalid_count
+
+        category_pbar.set_postfix({"done": processed, "skip": skipped, "err": errors})
 
         # Save periodically
         if processed % 500 == 0:
