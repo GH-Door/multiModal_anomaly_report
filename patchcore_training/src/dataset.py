@@ -74,6 +74,9 @@ class AnomalyDataset(Dataset):
             train_dir = category_dir / "train" / "good"
             if train_dir.exists():
                 for img_path in sorted(train_dir.glob("*")):
+                    # Skip macOS hidden files
+                    if img_path.name.startswith("._"):
+                        continue
                     if img_path.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp"]:
                         samples.append({
                             "image_path": img_path,
@@ -95,6 +98,9 @@ class AnomalyDataset(Dataset):
                     for img_path in sorted(defect_dir.glob("*")):
                         if img_path.suffix.lower() not in [".jpg", ".jpeg", ".png", ".bmp"]:
                             continue
+                        # Skip macOS hidden files
+                        if img_path.name.startswith("._"):
+                            continue
 
                         mask_path = None
                         if not is_normal and self.include_mask:
@@ -112,18 +118,18 @@ class AnomalyDataset(Dataset):
     def _get_mask_path(self, img_path: Path, defect_type: str) -> Optional[Path]:
         """Get mask path based on dataset format.
 
-        MVTec-LOCO: ground_truth/{defect_type}/{stem}/{stem}.png (nested folder)
+        MVTec-LOCO: ground_truth/{defect_type}/{stem}/000.png (nested folder, always 000.png inside)
         GoodsAD: ground_truth/{defect_type}/{stem}.png (flat)
         """
         gt_dir = img_path.parent.parent.parent / "ground_truth" / defect_type
 
         if self.dataset_name == "MVTec-LOCO":
-            # MVTec-LOCO: {stem}/{stem}.png (nested folder structure)
-            mask_path = gt_dir / img_path.stem / f"{img_path.stem}.png"
+            # MVTec-LOCO: {stem}/000.png (nested folder, mask is always named 000.png)
+            mask_path = gt_dir / img_path.stem / "000.png"
             if mask_path.exists():
                 return mask_path
-            # Fallback 1: try {stem}_mask.png
-            mask_path = gt_dir / f"{img_path.stem}_mask.png"
+            # Fallback 1: try {stem}/{stem}.png
+            mask_path = gt_dir / img_path.stem / f"{img_path.stem}.png"
             if mask_path.exists():
                 return mask_path
             # Fallback 2: try flat structure
