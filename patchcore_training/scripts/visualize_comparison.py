@@ -107,12 +107,23 @@ def create_comparison_image(
         mask_uint8 = (gt_mask > 0).astype(np.uint8) * 255
         contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(gt_display, contours, -1, (0, 255, 0), 2)
-    else:
-        # No mask - show original with "No Mask" text
+    elif is_anomaly_gt:
+        # Anomaly but no mask available - show original with warning
         gt_display = original.copy()
-        if is_anomaly_gt:
-            cv2.putText(gt_display, "No Mask", (10, h-20),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        # Add semi-transparent overlay to indicate no mask
+        overlay = np.zeros_like(original)
+        overlay[:] = (0, 100, 100)  # Dark yellow tint
+        gt_display = cv2.addWeighted(gt_display, 0.8, overlay, 0.2, 0)
+        cv2.putText(gt_display, "No Mask Available", (10, h//2),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    else:
+        # Normal sample - show black/empty mask (no defect region)
+        gt_display = np.zeros_like(original)
+        # Add text to indicate it's normal (no defect)
+        cv2.putText(gt_display, "Normal", (w//2 - 40, h//2 - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(gt_display, "(No Defect)", (w//2 - 55, h//2 + 20),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
     # 3. Prediction heatmap
     # Normalize heatmap for visualization
