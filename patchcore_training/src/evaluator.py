@@ -187,9 +187,11 @@ class PatchCoreEvaluator:
         maps: np.ndarray,
         masks: np.ndarray,
         fpr_limit: float = 0.3,
-        num_thresholds: int = 200,
+        num_thresholds: int = 50,
     ) -> float:
         """Compute Per-Region Overlap (PRO) score.
+
+        Optimized: precompute connected components once, not per-threshold.
 
         Args:
             maps: Anomaly maps (N, H, W)
@@ -202,49 +204,45 @@ class PatchCoreEvaluator:
         """
         masks_binary = (masks > 0).astype(np.float32)
 
-        # Get thresholds from anomaly map values
-        min_val, max_val = maps.min(), maps.max()
-        thresholds = np.linspace(max_val, min_val, num_thresholds)
+        # Precompute connected components for all masks (do this ONCE)
+        region_info = []  # List of (image_idx, region_mask, region_size)
+        for i in range(len(masks)):
+            if masks_binary[i].sum() == 0:
+                continue
+            labeled_mask, num_regions = connected_components(masks_binary[i])
+            for region_id in range(1, num_regions + 1):
+                region_mask = (labeled_mask == region_id)
+                region_info.append((i, region_mask, region_mask.sum()))
 
-        # Compute FPR and per-region overlap at each threshold
-        fprs = []
-        pros = []
+        if not region_info:
+            return 0.0
 
         # Precompute total negative pixels
         total_neg = (masks_binary == 0).sum()
         if total_neg == 0:
             return 0.0
 
-        for thresh in thresholds:
-            preds = (maps >= thresh).astype(np.float32)
+        # Get thresholds from anomaly map values
+        min_val, max_val = maps.min(), maps.max()
+        thresholds = np.linspace(max_val, min_val, num_thresholds)
 
-            # FPR = FP / (FP + TN) = FP / total_negative
-            fp = ((preds == 1) & (masks_binary == 0)).sum()
-            fpr = fp / total_neg
-            fprs.append(fpr)
+        # Compute FPR and per-region overlap at each threshold
+        fprs = np.zeros(num_thresholds)
+        pros = np.zeros(num_thresholds)
 
-            # Per-region overlap: average IoU over connected components in GT
-            region_overlaps = []
-            for i in range(len(masks)):
-                if masks_binary[i].sum() == 0:
-                    continue
+        for t_idx, thresh in enumerate(thresholds):
+            preds = (maps >= thresh)
 
-                # Get connected components in ground truth
-                labeled_mask, num_regions = connected_components(masks_binary[i])
+            # FPR
+            fp = (preds & (masks_binary == 0)).sum()
+            fprs[t_idx] = fp / total_neg
 
-                for region_id in range(1, num_regions + 1):
-                    region = (labeled_mask == region_id)
-                    region_pred = preds[i][region]
-                    overlap = region_pred.sum() / region.sum()
-                    region_overlaps.append(overlap)
-
-            if region_overlaps:
-                pros.append(np.mean(region_overlaps))
-            else:
-                pros.append(0.0)
-
-        fprs = np.array(fprs)
-        pros = np.array(pros)
+            # Per-region overlap using precomputed regions
+            overlaps = np.array([
+                preds[img_idx][region_mask].sum() / region_size
+                for img_idx, region_mask, region_size in region_info
+            ])
+            pros[t_idx] = overlaps.mean()
 
         # Sort by FPR
         sorted_idx = np.argsort(fprs)
@@ -256,14 +254,11 @@ class PatchCoreEvaluator:
         if valid_idx.sum() < 2:
             return 0.0
 
-        fprs_valid = fprs[valid_idx]
-        pros_valid = pros[valid_idx]
-
         # Normalize FPR to [0, 1] range within the limit
-        fprs_norm = fprs_valid / fpr_limit
+        fprs_norm = fprs[valid_idx] / fpr_limit
 
         # Compute area under curve using trapezoidal rule
-        pro_score = np.trapz(pros_valid, fprs_norm)
+        pro_score = np.trapz(pros[valid_idx], fprs_norm)
 
         return float(pro_score)
 
