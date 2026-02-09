@@ -24,7 +24,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict
 
 import cv2
 import numpy as np
@@ -50,7 +50,7 @@ def save_visualization(
     score_threshold: float = 3.0,
     global_max: float = 5.0,
 ):
-    """Save heatmap and overlay visualization.
+    """Save combined visualization (single file instead of 3).
 
     Args:
         image_path: Relative path to original image
@@ -59,7 +59,7 @@ def save_visualization(
         data_root: Root directory of images
         vis_dir: Directory to save visualizations
         score_threshold: Score threshold for anomaly detection
-        global_max: Global max for normalization (prevents normal images from looking hot)
+        global_max: Global max for normalization
     """
     # Load original image
     full_path = data_root / image_path
@@ -71,65 +71,30 @@ def save_visualization(
 
     # Resize anomaly map to original size
     anomaly_map_resized = cv2.resize(anomaly_map, (w, h))
-
-    # Global normalization (not per-image) - 정상 이미지가 빨갛게 보이지 않도록
-    # score_threshold 기준으로 정규화: threshold 이하는 파랑, 이상은 빨강
     anomaly_map_norm = np.clip(anomaly_map_resized / global_max, 0, 1)
 
-    # 1. Create heatmap
+    # Create heatmap overlay (combined view)
     heatmap = cv2.applyColorMap(
         (anomaly_map_norm * 255).astype(np.uint8),
         cv2.COLORMAP_JET
     )
 
-    # 2. Create overlay (heatmap on original)
-    # 정상 이미지면 overlay 비중 낮춤
     is_anomaly = anomaly_score > score_threshold
     alpha = 0.4 if is_anomaly else 0.2
     overlay = cv2.addWeighted(original, 1 - alpha, heatmap, alpha, 0)
 
-    # 3. Create anomaly region highlight
-    # threshold를 점수 기반으로 설정 (상위 영역만 표시)
-    map_threshold = score_threshold / global_max  # normalized threshold
-    mask = (anomaly_map_norm > map_threshold).astype(np.uint8)
-
-    highlight = original.copy()
-
-    if is_anomaly and mask.sum() > 0:
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(highlight, contours, -1, (0, 0, 255), 2)  # Red contours
-
-        # Fill anomaly regions with semi-transparent red
-        red_overlay = original.copy()
-        red_overlay[mask == 1] = [0, 0, 255]
-        highlight = cv2.addWeighted(highlight, 0.7, red_overlay, 0.3, 0)
-
-    # Add score text and label
+    # Add score text
     label = "ANOMALY" if is_anomaly else "NORMAL"
     color = (0, 0, 255) if is_anomaly else (0, 255, 0)
+    cv2.putText(overlay, f"{label} ({anomaly_score:.2f})", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-    for img in [overlay, highlight]:
-        cv2.putText(img, f"Score: {anomaly_score:.4f}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        cv2.putText(img, label, (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-
-    # Create output paths (preserve directory structure)
+    # Save single combined image (3x faster than saving 3 files)
     rel_dir = Path(image_path).parent
     stem = Path(image_path).stem
-
-    heatmap_dir = vis_dir / "heatmap" / rel_dir
-    overlay_dir = vis_dir / "overlay" / rel_dir
-    highlight_dir = vis_dir / "highlight" / rel_dir
-
-    heatmap_dir.mkdir(parents=True, exist_ok=True)
-    overlay_dir.mkdir(parents=True, exist_ok=True)
-    highlight_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save images
-    cv2.imwrite(str(heatmap_dir / f"{stem}_heatmap.png"), heatmap)
-    cv2.imwrite(str(overlay_dir / f"{stem}_overlay.png"), overlay)
-    cv2.imwrite(str(highlight_dir / f"{stem}_highlight.png"), highlight)
+    out_dir = vis_dir / rel_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_dir / f"{stem}.jpg"), overlay, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
 
 def parse_args():
@@ -238,7 +203,6 @@ def load_models(config: Dict, device: torch.device) -> Dict[str, PatchCore]:
 def process_batch(
     model: PatchCore,
     images: torch.Tensor,
-    original_sizes: List[tuple],
     score_threshold: float,
     device: torch.device,
 ) -> tuple:
@@ -247,12 +211,11 @@ def process_batch(
     Args:
         model: PatchCore model
         images: Batch of images (B, C, H, W)
-        original_sizes: List of original image sizes
         score_threshold: Anomaly score threshold (raw score 기준)
         device: Device
 
     Returns:
-        Tuple of (results list, normalized anomaly maps list)
+        Tuple of (results list, raw anomaly maps list)
     """
     images = images.to(device)
 
@@ -477,19 +440,11 @@ def main():
             valid_indices = torch.where(valid_mask)[0]
             images = batch["image"][valid_indices]
 
-            # original_size는 DataLoader가 (heights_tensor, widths_tensor)로 collate함
-            heights, widths = batch["original_size"]
-            original_sizes = [
-                (int(heights[i]), int(widths[i]))
-                for i in valid_indices.tolist()
-            ]
-
             # Process batch
             try:
                 batch_results, batch_maps = process_batch(
                     model=model,
                     images=images,
-                    original_sizes=original_sizes,
                     score_threshold=category_threshold,
                     device=device,
                 )
@@ -569,7 +524,7 @@ def main():
 
         # 현재 threshold로 분류된 결과
         n_anomaly = sum(1 for r in results if r["is_anomaly"])
-        print(f"\n  Current threshold ({threshold}): {n_anomaly}/{len(results)} classified as anomaly")
+        print(f"\n  Classified as anomaly: {n_anomaly}/{len(results)}")
 
         print(f"\n  Tip: 정상 데이터가 anomaly로 분류되면 threshold를 높이세요.")
         print(f"       예: --threshold 값을 median~75% 사이로 설정")

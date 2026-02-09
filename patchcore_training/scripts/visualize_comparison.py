@@ -216,112 +216,128 @@ def process_category(
 
     print(f"\nProcessing: {dataset_name}/{category} (threshold={threshold:.2f})")
 
-    # Create dataloader
     data_root = Path(config["data"]["root"])
     image_size = config["data"].get("image_size", 224)
 
-    dataloader = get_dataloader(
-        root=data_root,
-        dataset_name=dataset_name,
-        category=category,
-        split="test",
-        image_size=image_size,
-        batch_size=1,  # Process one at a time for visualization
-        num_workers=0,
-        include_mask=True,
-    )
+    # First, scan files and group by defect type (fast - no model inference)
+    test_dir = data_root / dataset_name / category / "test"
+    if not test_dir.exists():
+        print(f"  No test directory found")
+        return
 
-    if len(dataloader.dataset) == 0:
+    files_by_type = defaultdict(list)
+    for defect_dir in test_dir.iterdir():
+        if not defect_dir.is_dir():
+            continue
+        defect_type = defect_dir.name
+        for img_path in defect_dir.glob("*"):
+            if img_path.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp"]:
+                if not img_path.name.startswith("._"):
+                    files_by_type[defect_type].append(img_path)
+
+    if not files_by_type:
         print(f"  No test samples found")
         return
 
-    # Collect samples by defect type
-    samples_by_type = defaultdict(list)
+    # Pre-sample files BEFORE loading (key optimization!)
+    selected_files = {}
+    for defect_type, files in files_by_type.items():
+        n_samples = min(samples_per_type, len(files))
+        selected_files[defect_type] = random.sample(files, n_samples)
+        print(f"  {defect_type}: {len(files)} total, selected {n_samples}")
+
+    # Create output directory
+    cat_output_dir = output_dir / dataset_name / category
+    cat_output_dir.mkdir(parents=True, exist_ok=True)
 
     model.to(device)
     model.eval()
 
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc=f"  Collecting samples", leave=False):
-            image = batch["image"].to(device)
-            label = batch["label"].item()
-            mask = batch["mask"].numpy().squeeze()  # (H, W)
-            image_path = batch["image_path"][0]
-            defect_type = batch["defect_type"][0]
+    # Process only selected files
+    from torchvision import transforms
+    transform = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((image_size, image_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
-            # Get prediction
-            scores, maps = model.predict(image)
-            anomaly_score = scores[0].cpu().item()
-            anomaly_map = maps[0].cpu().numpy()  # (H, W)
+    for defect_type, files in selected_files.items():
+        comparison_images = []
 
-            # Load original image (full resolution)
-            full_path = data_root / image_path
-            original = cv2.imread(str(full_path))
+        for i, img_path in enumerate(files):
+            # Load original image
+            original = cv2.imread(str(img_path))
             if original is None:
                 continue
 
-            # Resize mask and map to original size
             h, w = original.shape[:2]
-            if mask.shape != (h, w):
-                mask = cv2.resize(mask.astype(np.float32), (w, h), interpolation=cv2.INTER_NEAREST)
+            is_anomaly_gt = defect_type != "good"
+
+            # Load mask if available
+            mask = np.zeros((h, w), dtype=np.float32)
+            if is_anomaly_gt:
+                gt_dir = data_root / dataset_name / category / "ground_truth" / defect_type
+                if dataset_name == "MVTec-LOCO":
+                    mask_path = gt_dir / img_path.stem / "000.png"
+                else:
+                    mask_path = gt_dir / f"{img_path.stem}.png"
+                if mask_path.exists():
+                    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                    if mask is None:
+                        mask = np.zeros((h, w), dtype=np.float32)
+
+            # Preprocess for model
+            img_rgb = cv2.cvtColor(original, cv2.COLOR_BGR2RGB)
+            img_tensor = transform(img_rgb).unsqueeze(0).to(device)
+
+            # Inference
+            with torch.no_grad():
+                scores, maps = model.predict(img_tensor)
+                anomaly_score = scores[0].cpu().item()
+                anomaly_map = maps[0].cpu().numpy()
+
+            # Resize anomaly map to original size
             if anomaly_map.shape != (h, w):
                 anomaly_map = cv2.resize(anomaly_map, (w, h), interpolation=cv2.INTER_LINEAR)
 
-            sample_info = {
-                "original": original,
-                "mask": mask,
-                "anomaly_map": anomaly_map,
-                "anomaly_score": anomaly_score,
-                "label": label,
-                "defect_type": defect_type,
-                "image_path": image_path,
-            }
-
-            samples_by_type[defect_type].append(sample_info)
-
-    # Create output directory for this category
-    cat_output_dir = output_dir / dataset_name / category
-    cat_output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Sample and save for each defect type
-    for defect_type, samples in samples_by_type.items():
-        # Random sample
-        n_samples = min(samples_per_type, len(samples))
-        selected = random.sample(samples, n_samples)
-
-        print(f"  {defect_type}: {len(samples)} samples, selected {n_samples}")
-
-        # Create comparison images
-        comparison_images = []
-        for i, sample in enumerate(selected):
+            # Create comparison image
             comp_img = create_comparison_image(
-                original=sample["original"],
-                gt_mask=sample["mask"],
-                pred_heatmap=sample["anomaly_map"],
-                anomaly_score=sample["anomaly_score"],
+                original=original,
+                gt_mask=mask,
+                pred_heatmap=anomaly_map,
+                anomaly_score=anomaly_score,
                 threshold=threshold,
-                is_anomaly_gt=sample["label"] == 1,
-                defect_type=sample["defect_type"],
+                is_anomaly_gt=is_anomaly_gt,
+                defect_type=defect_type,
             )
             comparison_images.append(comp_img)
 
-            # Also save individual comparison
+            # Save individual
             individual_path = cat_output_dir / f"{defect_type}_{i+1}.png"
             cv2.imwrite(str(individual_path), comp_img)
 
         # Create combined grid (vertical stack)
         if comparison_images:
-            # Add spacing between rows
+            # Resize all images to same width
+            max_width = max(img.shape[1] for img in comparison_images)
+            resized_images = []
+            for img in comparison_images:
+                if img.shape[1] != max_width:
+                    scale = max_width / img.shape[1]
+                    new_h = int(img.shape[0] * scale)
+                    img = cv2.resize(img, (max_width, new_h))
+                resized_images.append(img)
+
             spacing = 10
             spaced_images = []
-            for img in comparison_images:
+            for img in resized_images:
                 spaced_images.append(img)
-                spaced_images.append(np.ones((spacing, img.shape[1], 3), dtype=np.uint8) * 50)
+                spaced_images.append(np.ones((spacing, max_width, 3), dtype=np.uint8) * 50)
 
             if spaced_images:
-                spaced_images = spaced_images[:-1]  # Remove last spacer
+                spaced_images = spaced_images[:-1]
                 combined_grid = np.vstack(spaced_images)
-
                 grid_path = cat_output_dir / f"{defect_type}_grid.png"
                 cv2.imwrite(str(grid_path), combined_grid)
 
