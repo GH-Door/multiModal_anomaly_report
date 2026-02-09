@@ -1,18 +1,12 @@
 """PatchCore evaluator module."""
 
-import csv
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict
 
 import numpy as np
 import torch
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
+from scipy.ndimage import label as connected_components
+from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
 from .dataset import get_dataloader
@@ -54,9 +48,8 @@ class PatchCoreEvaluator:
 
         # Evaluation settings
         eval_config = config.get("evaluation", {})
-        self.batch_size = eval_config.get("batch_size", 32)
-        self.threshold = eval_config.get("threshold", 0.5)
-        self.num_workers = config.get("training", {}).get("num_workers", 4)
+        self.batch_size = eval_config.get("batch_size", 64)  # Larger batch for speed
+        self.num_workers = config.get("training", {}).get("num_workers", 8)  # More workers
 
         # Output settings
         output_config = config.get("output", {})
@@ -68,7 +61,6 @@ class PatchCoreEvaluator:
         dataset_name: str,
         category: str,
         verbose: bool = True,
-        threshold: float = None,
     ) -> Dict:
         """Evaluate model on a single category.
 
@@ -77,21 +69,17 @@ class PatchCoreEvaluator:
             dataset_name: Dataset name
             category: Category name
             verbose: Print progress
-            threshold: Optional category-specific threshold (overrides self.threshold)
 
         Returns:
-            Dictionary with evaluation metrics
+            Dictionary with evaluation metrics (image_auroc, pixel_auroc, pro)
         """
-        # Use provided threshold or fall back to self.threshold
-        eval_threshold = threshold if threshold is not None else self.threshold
-
         if verbose:
-            print(f"\nEvaluating: {dataset_name}/{category} (threshold={eval_threshold:.4f})")
+            print(f"\nEvaluating: {dataset_name}/{category}")
 
         model.to(self.device)
         model.eval()
 
-        # Create test dataloader
+        # Create test dataloader with more workers for speed
         dataloader = get_dataloader(
             root=self.data_root,
             dataset_name=dataset_name,
@@ -112,16 +100,12 @@ class PatchCoreEvaluator:
         all_labels = []
         all_maps = []
         all_masks = []
-        all_paths = []
-        all_defect_types = []
 
         with torch.no_grad():
-            for batch in tqdm(dataloader, desc=f"  {dataset_name}/{category}", leave=False, mininterval=1.0):
+            for batch in dataloader:
                 images = batch["image"].to(self.device)
                 labels = batch["label"].numpy()
                 masks = batch["mask"].numpy()
-                paths = batch["image_path"]
-                defect_types = batch["defect_type"]
 
                 scores, maps = model.predict(images)
 
@@ -129,8 +113,6 @@ class PatchCoreEvaluator:
                 all_labels.append(labels)
                 all_maps.append(maps.cpu().numpy())
                 all_masks.append(masks)
-                all_paths.extend(paths)
-                all_defect_types.extend(defect_types)
 
         # Concatenate results
         all_scores = np.concatenate(all_scores)
@@ -138,35 +120,18 @@ class PatchCoreEvaluator:
         all_maps = np.concatenate(all_maps)
         all_masks = np.concatenate(all_masks).squeeze(1)  # Remove channel dim
 
-        # Store predictions for CSV export
-        self._last_predictions = {
-            "paths": all_paths,
-            "scores": all_scores,
-            "labels": all_labels,
-            "defect_types": all_defect_types,
-            "dataset": dataset_name,
-            "category": category,
-        }
-
         # Compute image-level metrics
-        metrics = self._compute_image_metrics(all_scores, all_labels, eval_threshold)
+        metrics = self._compute_image_metrics(all_scores, all_labels)
 
         # Compute pixel-level metrics if masks available
         if all_masks.max() > 0:
-            pixel_metrics = self._compute_pixel_metrics(all_maps, all_masks, eval_threshold)
+            pixel_metrics = self._compute_pixel_metrics(all_maps, all_masks)
             metrics.update(pixel_metrics)
 
-        metrics["threshold_used"] = eval_threshold
-
-        metrics["n_samples"] = len(all_labels)
-        metrics["n_anomaly"] = int(all_labels.sum())
-        metrics["n_normal"] = int((1 - all_labels).sum())
-
         if verbose:
-            print(f"  Image AUROC: {metrics.get('image_auroc', 0):.4f}")
-            print(f"  Image F1: {metrics.get('image_f1', 0):.4f}")
-            if "pixel_auroc" in metrics:
-                print(f"  Pixel AUROC: {metrics['pixel_auroc']:.4f}")
+            print(f"  Image AUROC: {metrics.get('image_auroc', 0):.4f}, "
+                  f"Pixel AUROC: {metrics.get('pixel_auroc', 0):.4f}, "
+                  f"PRO: {metrics.get('pro', 0):.4f}")
 
         return metrics
 
@@ -174,49 +139,36 @@ class PatchCoreEvaluator:
         self,
         scores: np.ndarray,
         labels: np.ndarray,
-        threshold: float = None,
     ) -> Dict:
         """Compute image-level metrics.
 
         Args:
             scores: Anomaly scores (N,)
             labels: Ground truth labels (N,)
-            threshold: Threshold for binary classification (raw score, not normalized)
 
         Returns:
             Dictionary with metrics
         """
-        # Use raw score threshold (not normalized)
-        eval_threshold = threshold if threshold is not None else self.threshold
-        preds = (scores > eval_threshold).astype(int)
-
         metrics = {
             "image_auroc": roc_auc_score(labels, scores) if len(np.unique(labels)) > 1 else 0.0,
-            "image_accuracy": accuracy_score(labels, preds),
-            "image_precision": precision_score(labels, preds, zero_division=0),
-            "image_recall": recall_score(labels, preds, zero_division=0),
-            "image_f1": f1_score(labels, preds, zero_division=0),
         }
-
         return metrics
 
     def _compute_pixel_metrics(
         self,
         maps: np.ndarray,
         masks: np.ndarray,
-        threshold: float = None,
     ) -> Dict:
-        """Compute pixel-level metrics.
+        """Compute pixel-level metrics (pixel AUROC and PRO).
 
         Args:
             maps: Anomaly maps (N, H, W)
             masks: Ground truth masks (N, H, W)
-            threshold: Raw score threshold (will be normalized for pixel-level)
 
         Returns:
             Dictionary with pixel metrics
         """
-        # Flatten for pixel-level evaluation
+        # Flatten for pixel-level AUROC
         maps_flat = maps.flatten()
         masks_flat = (masks > 0).astype(int).flatten()
 
@@ -224,56 +176,119 @@ class PatchCoreEvaluator:
         if len(np.unique(masks_flat)) < 2:
             return {}
 
-        # For pixel-level, normalize maps and threshold
-        # Use 0.5 as default normalized threshold for pixel metrics
-        maps_norm = (maps_flat - maps_flat.min()) / (maps_flat.max() - maps_flat.min() + 1e-8)
-        pixel_threshold = 0.5  # Fixed normalized threshold for pixel-level
-        preds_flat = (maps_norm > pixel_threshold).astype(int)
-
         metrics = {
             "pixel_auroc": roc_auc_score(masks_flat, maps_flat),
-            "pixel_f1": f1_score(masks_flat, preds_flat, zero_division=0),
-            "pixel_precision": precision_score(masks_flat, preds_flat, zero_division=0),
-            "pixel_recall": recall_score(masks_flat, preds_flat, zero_division=0),
+            "pro": self._compute_pro(maps, masks),
         }
-
         return metrics
+
+    def _compute_pro(
+        self,
+        maps: np.ndarray,
+        masks: np.ndarray,
+        fpr_limit: float = 0.3,
+        num_thresholds: int = 200,
+    ) -> float:
+        """Compute Per-Region Overlap (PRO) score.
+
+        Args:
+            maps: Anomaly maps (N, H, W)
+            masks: Ground truth masks (N, H, W)
+            fpr_limit: FPR integration limit (default 0.3)
+            num_thresholds: Number of thresholds to evaluate
+
+        Returns:
+            PRO score (0-1)
+        """
+        masks_binary = (masks > 0).astype(np.float32)
+
+        # Get thresholds from anomaly map values
+        min_val, max_val = maps.min(), maps.max()
+        thresholds = np.linspace(max_val, min_val, num_thresholds)
+
+        # Compute FPR and per-region overlap at each threshold
+        fprs = []
+        pros = []
+
+        # Precompute total negative pixels
+        total_neg = (masks_binary == 0).sum()
+        if total_neg == 0:
+            return 0.0
+
+        for thresh in thresholds:
+            preds = (maps >= thresh).astype(np.float32)
+
+            # FPR = FP / (FP + TN) = FP / total_negative
+            fp = ((preds == 1) & (masks_binary == 0)).sum()
+            fpr = fp / total_neg
+            fprs.append(fpr)
+
+            # Per-region overlap: average IoU over connected components in GT
+            region_overlaps = []
+            for i in range(len(masks)):
+                if masks_binary[i].sum() == 0:
+                    continue
+
+                # Get connected components in ground truth
+                labeled_mask, num_regions = connected_components(masks_binary[i])
+
+                for region_id in range(1, num_regions + 1):
+                    region = (labeled_mask == region_id)
+                    region_pred = preds[i][region]
+                    overlap = region_pred.sum() / region.sum()
+                    region_overlaps.append(overlap)
+
+            if region_overlaps:
+                pros.append(np.mean(region_overlaps))
+            else:
+                pros.append(0.0)
+
+        fprs = np.array(fprs)
+        pros = np.array(pros)
+
+        # Sort by FPR
+        sorted_idx = np.argsort(fprs)
+        fprs = fprs[sorted_idx]
+        pros = pros[sorted_idx]
+
+        # Integrate up to fpr_limit
+        valid_idx = fprs <= fpr_limit
+        if valid_idx.sum() < 2:
+            return 0.0
+
+        fprs_valid = fprs[valid_idx]
+        pros_valid = pros[valid_idx]
+
+        # Normalize FPR to [0, 1] range within the limit
+        fprs_norm = fprs_valid / fpr_limit
+
+        # Compute area under curve using trapezoidal rule
+        pro_score = np.trapz(pros_valid, fprs_norm)
+
+        return float(pro_score)
 
     def evaluate_all(
         self,
         models: Dict[str, PatchCore],
         verbose: bool = True,
-        save_predictions_csv: str = None,
-        per_category_thresholds: Dict[str, float] = None,
     ) -> Dict[str, Dict]:
         """Evaluate all loaded models.
 
         Args:
             models: Dictionary mapping "dataset/category" to models
             verbose: Print progress
-            save_predictions_csv: Path to save per-sample predictions CSV
-            per_category_thresholds: Optional dict mapping "dataset/category" to threshold
 
         Returns:
             Dictionary mapping "dataset/category" to metrics
         """
         results = {}
-        all_predictions = []  # For CSV export
         total = len(models)
 
-        if per_category_thresholds:
-            print(f"\nEvaluating {total} models with per-category thresholds")
-        else:
-            print(f"\nEvaluating {total} models (threshold={self.threshold})")
+        print(f"\nEvaluating {total} models")
 
         pbar = tqdm(models.items(), desc="Evaluating", total=total)
         for key, model in pbar:
-            # Get category-specific threshold if available
-            category_threshold = None
-            if per_category_thresholds:
-                category_threshold = per_category_thresholds.get(key)
-
-            pbar.set_description(f"Evaluating {key}")
+            pbar.set_description(f"{key}")
 
             parts = key.split("/")
             dataset_name, category = parts[0], parts[1]
@@ -282,39 +297,17 @@ class PatchCoreEvaluator:
                 model=model,
                 dataset_name=dataset_name,
                 category=category,
-                verbose=False,  # Suppress individual category output for cleaner progress
-                threshold=category_threshold,
+                verbose=False,
             )
 
             results[key] = metrics
 
-            # Collect predictions for CSV
-            if hasattr(self, '_last_predictions') and self._last_predictions:
-                pred = self._last_predictions
-                # Use the threshold that was actually used for this category
-                used_threshold = metrics.get("threshold_used", self.threshold)
-                for i in range(len(pred["paths"])):
-                    score = float(pred["scores"][i])
-                    pred_label = int(score > used_threshold)
-                    all_predictions.append({
-                        "image_path": pred["paths"][i],
-                        "dataset": pred["dataset"],
-                        "category": pred["category"],
-                        "defect_type": pred["defect_types"][i],
-                        "gt_label": int(pred["labels"][i]),  # 0=normal, 1=anomaly
-                        "anomaly_score": score,
-                        "threshold_used": used_threshold,
-                        "pred_label": pred_label,
-                        "correct": int(pred["labels"][i]) == pred_label,
-                    })
-
-            # Show AUROC in progress bar
-            auroc = metrics.get('image_auroc', 0)
-            pbar.set_postfix({"AUROC": f"{auroc:.4f}"})
-
-        # Save predictions CSV
-        if save_predictions_csv and all_predictions:
-            self._save_predictions_csv(all_predictions, save_predictions_csv)
+            # Show metrics in progress bar
+            pbar.set_postfix({
+                "I-AUC": f"{metrics.get('image_auroc', 0):.3f}",
+                "P-AUC": f"{metrics.get('pixel_auroc', 0):.3f}",
+                "PRO": f"{metrics.get('pro', 0):.3f}",
+            })
 
         # Compute average metrics
         if results:
@@ -324,34 +317,11 @@ class PatchCoreEvaluator:
             print(f"\n{'='*60}")
             print("Average Metrics:")
             print(f"  Image AUROC: {avg_metrics.get('image_auroc', 0):.4f}")
-            print(f"  Image F1: {avg_metrics.get('image_f1', 0):.4f}")
-            if "pixel_auroc" in avg_metrics:
-                print(f"  Pixel AUROC: {avg_metrics['pixel_auroc']:.4f}")
+            print(f"  Pixel AUROC: {avg_metrics.get('pixel_auroc', 0):.4f}")
+            print(f"  PRO:         {avg_metrics.get('pro', 0):.4f}")
             print(f"{'='*60}")
 
         return results
-
-    def _save_predictions_csv(self, predictions: List[Dict], output_path: str) -> None:
-        """Save per-sample predictions to CSV.
-
-        Args:
-            predictions: List of prediction dictionaries
-            output_path: Output CSV path
-        """
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        fieldnames = [
-            "image_path", "dataset", "category", "defect_type",
-            "gt_label", "anomaly_score", "threshold_used", "pred_label", "correct"
-        ]
-
-        with open(output_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(predictions)
-
-        print(f"Predictions saved to: {output_path}")
 
     def _compute_average_metrics(self, results: Dict[str, Dict]) -> Dict:
         """Compute average metrics across all categories.
@@ -362,31 +332,17 @@ class PatchCoreEvaluator:
         Returns:
             Dictionary with averaged metrics
         """
-        metric_keys = [
-            "image_auroc", "image_accuracy", "image_precision",
-            "image_recall", "image_f1", "pixel_auroc", "pixel_f1",
-        ]
-
+        metric_keys = ["image_auroc", "pixel_auroc", "pro"]
         avg_metrics = {}
-        total_samples = 0
-
-        for key, metrics in results.items():
-            if key == "average":
-                continue
-            total_samples += metrics.get("n_samples", 0)
 
         for metric_key in metric_keys:
-            values = []
-            for key, metrics in results.items():
-                if key == "average":
-                    continue
-                if metric_key in metrics:
-                    values.append(metrics[metric_key])
-
+            values = [
+                metrics[metric_key]
+                for key, metrics in results.items()
+                if key != "average" and metric_key in metrics
+            ]
             if values:
                 avg_metrics[metric_key] = np.mean(values)
-
-        avg_metrics["total_samples"] = total_samples
 
         return avg_metrics
 

@@ -5,9 +5,6 @@ Usage:
     # Evaluate all trained models
     python patchcore_training/scripts/evaluate.py
 
-    # Evaluate with custom config
-    python patchcore_training/scripts/evaluate.py --config patchcore_training/config/config.yaml
-
     # Evaluate specific category
     python patchcore_training/scripts/evaluate.py --dataset GoodsAD --category cigarette_box
 
@@ -57,22 +54,10 @@ def parse_args():
         help="Output path for results JSON",
     )
     parser.add_argument(
-        "--save-csv",
-        type=str,
-        default=None,
-        help="Output path for per-sample predictions CSV",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=42,
         help="Random seed",
-    )
-    parser.add_argument(
-        "--thresholds",
-        type=str,
-        default=None,
-        help="Path to per-category thresholds YAML file (e.g., config/thresholds.yaml)",
     )
 
     return parser.parse_args()
@@ -88,25 +73,6 @@ def main():
     print(f"Loading config from: {args.config}")
     config = load_config(args.config)
 
-    # Load per-category thresholds if provided
-    per_category_thresholds = None
-    if args.thresholds:
-        import yaml
-        from pathlib import Path
-        thresholds_path = Path(args.thresholds)
-        if thresholds_path.exists():
-            with open(thresholds_path, "r", encoding="utf-8") as f:
-                thresholds_config = yaml.safe_load(f)
-            global_threshold = thresholds_config.get("global", 0.5)
-            per_category_thresholds = thresholds_config.get("categories", {})
-            # Update evaluator's default threshold
-            config.setdefault("evaluation", {})["threshold"] = global_threshold
-            print(f"Loaded per-category thresholds from: {thresholds_path}")
-            print(f"  Global fallback: {global_threshold}")
-            print(f"  Categories: {len(per_category_thresholds)}")
-        else:
-            print(f"Warning: Thresholds file not found: {thresholds_path}")
-
     # Create trainer and evaluator
     trainer = PatchCoreTrainer(config)
     evaluator = PatchCoreEvaluator(config)
@@ -121,16 +87,10 @@ def main():
             print(f"Model not found for {category_key}")
             return
 
-        # Get category-specific threshold if available
-        category_threshold = None
-        if per_category_thresholds:
-            category_threshold = per_category_thresholds.get(category_key)
-
         metrics = evaluator.evaluate_category(
             model=model,
             dataset_name=args.dataset,
             category=args.category,
-            threshold=category_threshold,
         )
         results = {category_key: metrics}
     else:
@@ -145,29 +105,21 @@ def main():
             models = {k: v for k, v in models.items() if k.startswith(args.dataset + "/")}
 
         # Evaluate all
-        results = evaluator.evaluate_all(
-            models,
-            save_predictions_csv=args.save_csv,
-            per_category_thresholds=per_category_thresholds,
-        )
+        results = evaluator.evaluate_all(models)
 
     # Save results if output path specified
     if args.output:
         evaluator.save_results(results, args.output)
     else:
-        # Print summary
+        # Print per-category results
         print("\n" + "=" * 60)
-        print("Evaluation Results Summary")
+        print(f"{'Category':<35} {'I-AUROC':>10} {'P-AUROC':>10} {'PRO':>10}")
         print("=" * 60)
         for key, metrics in results.items():
             if key == "average":
                 continue
-            print(f"\n{key}:")
-            for metric_name, value in metrics.items():
-                if isinstance(value, float):
-                    print(f"  {metric_name}: {value:.4f}")
-                else:
-                    print(f"  {metric_name}: {value}")
+            print(f"{key:<35} {metrics.get('image_auroc', 0):>10.4f} "
+                  f"{metrics.get('pixel_auroc', 0):>10.4f} {metrics.get('pro', 0):>10.4f}")
 
     print("\nDone!")
 
