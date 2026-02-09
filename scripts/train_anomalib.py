@@ -131,6 +131,7 @@ class Anomalibs:
         self.data_root = Path(self.config["data"]["root"])
         self.output_root = Path(self.config["data"]["output_root"])
         self.output_config = self.config.get("output", {})
+        self.predict_config = self.config.get("predict", {})
         self.engine_config = self.config.get("engine", {})
         self.device = get_device()
         self.accelerator = self.engine_config.get("accelerator", "auto")
@@ -444,23 +445,39 @@ class Anomalibs:
                 return version_dir
 
     def get_ckpt_path(self, dataset: str, category: str) -> Path | None:
-        """최신 버전의 best 체크포인트 경로 반환.
+        """체크포인트 경로 반환.
+
+        predict.version 설정에 따라 버전 선택:
+        - null: 최신 버전 자동 선택
+        - 0, 1, 2...: 특정 버전 지정
 
         model-v2.ckpt > model-v1.ckpt > model.ckpt 순으로 최신 선택
         """
         if self.model_name == "winclip":
             return None
 
-        latest = self.get_latest_version(dataset, category)
-        if latest is None:
-            return None
+        target_version = self.predict_config.get("version", None)
 
-        version_dir = self.get_category_dir(dataset, category) / f"v{latest}"
+        if target_version is not None:
+            # 특정 버전 지정
+            version_dir = self.get_category_dir(dataset, category) / f"v{target_version}"
+            if not version_dir.exists():
+                get_train_logger().warning(
+                    f"Specified version v{target_version} not found for {dataset}/{category}. "
+                    f"Falling back to latest version."
+                )
+                target_version = None
+
+        if target_version is None:
+            latest = self.get_latest_version(dataset, category)
+            if latest is None:
+                return None
+            version_dir = self.get_category_dir(dataset, category) / f"v{latest}"
         if not version_dir.exists():
             return None
 
-        # model-v{n}.ckpt 파일들 찾기 (가장 높은 버전 선택)
-        model_ckpts = list(version_dir.glob("model*.ckpt"))
+        # model-v{n}.ckpt 또는 model.pt 파일들 찾기
+        model_ckpts = list(version_dir.glob("model*.ckpt")) + list(version_dir.glob("model*.pt"))
         if not model_ckpts:
             return None
 
@@ -469,6 +486,14 @@ class Anomalibs:
 
         if not model_ckpts:
             return None
+
+        # .ckpt 우선, .pt는 fallback
+        ckpt_files = [p for p in model_ckpts if p.suffix == ".ckpt"]
+        pt_files = [p for p in model_ckpts if p.suffix == ".pt"]
+        if ckpt_files:
+            model_ckpts = ckpt_files
+        elif pt_files:
+            return pt_files[0]  # .pt는 버전 관리 없이 단일 파일
 
         # 버전 번호로 정렬 (model.ckpt=0, model-v1.ckpt=1, model-v2.ckpt=2)
         def get_version(path):
@@ -538,18 +563,23 @@ class Anomalibs:
         dm_kwargs = self.get_datamodule_kwargs()
         dm_kwargs["include_mask"] = True  # predict 시 GT mask 포함
         datamodule = self.loader.get_datamodule(dataset, category, **dm_kwargs)
-        engine = self.get_engine(dataset, category, model=model, datamodule=datamodule, stage="predict")
         ckpt_path = self.get_ckpt_path(dataset, category)
 
-        # WinCLIP requires class name for text embeddings
-        if self.model_name == "winclip":
-            model.setup(class_name=category)
+        # .pt 파일 (커스텀 torch.save 모델) 처리
+        if ckpt_path is not None and ckpt_path.suffix == ".pt":
+            predictions = self.predict_from_pt(model, datamodule, ckpt_path)
+        else:
+            engine = self.get_engine(dataset, category, model=model, datamodule=datamodule, stage="predict")
 
-        predictions = engine.predict(
-            datamodule=datamodule,
-            model=model,
-            ckpt_path=ckpt_path,
-        )
+            # WinCLIP requires class name for text embeddings
+            if self.model_name == "winclip":
+                model.setup(class_name=category)
+
+            predictions = engine.predict(
+                datamodule=datamodule,
+                model=model,
+                ckpt_path=ckpt_path,
+            )
 
         # save json
         if save_json is None:
@@ -558,6 +588,56 @@ class Anomalibs:
             self.save_predictions_json(predictions, dataset, category)
 
         return predictions
+
+    def predict_from_pt(self, model, datamodule, pt_path: Path):
+        """커스텀 torch.save() .pt 파일로부터 PatchCore predict 수행."""
+        from anomalib.data.dataclasses import ImageBatch
+        from torch.nn.functional import interpolate
+
+        get_inference_logger().info(f"Loading custom .pt model: {pt_path}")
+        pt_data = torch.load(pt_path, map_location=self.device, weights_only=False)
+
+        # PatchCore 모델에 memory bank 주입
+        memory_bank = pt_data["memory_bank"].to(self.device)
+        model.model.memory_bank = memory_bank
+        model.model.coreset_sampling_ratio = pt_data.get("coreset_ratio", 0.1)
+        model.model.num_neighbors = pt_data.get("n_neighbors", 9)
+
+        model.eval()
+        model.to(self.device)
+
+        datamodule.setup(stage="predict")
+        predict_loader = datamodule.predict_dataloader()
+
+        all_predictions = []
+        with torch.no_grad():
+            for batch in predict_loader:
+                images = batch.image.to(self.device)
+                outputs = model(images)
+
+                anomaly_map = getattr(outputs, "anomaly_map", None)
+                pred_score = getattr(outputs, "pred_score", None)
+
+                # anomaly_map 크기를 이미지 크기에 맞춤
+                if anomaly_map is not None and anomaly_map.shape[-2:] != images.shape[-2:]:
+                    anomaly_map = interpolate(anomaly_map, size=images.shape[-2:], mode="bilinear", align_corners=False)
+
+                pred_label = (pred_score > 0.5).int() if pred_score is not None else None
+                pred_mask = (anomaly_map > 0.5).int() if anomaly_map is not None else None
+
+                result = ImageBatch(
+                    image=images.cpu(),
+                    image_path=batch.image_path,
+                    gt_label=batch.gt_label if batch.gt_label is not None else None,
+                    gt_mask=batch.gt_mask if batch.gt_mask is not None else None,
+                    anomaly_map=anomaly_map.cpu() if anomaly_map is not None else None,
+                    pred_score=pred_score.cpu() if pred_score is not None else None,
+                    pred_label=pred_label.cpu() if pred_label is not None else None,
+                    pred_mask=pred_mask.cpu() if pred_mask is not None else None,
+                )
+                all_predictions.append(result)
+
+        return all_predictions
 
     def get_mask_path(self, image_path: str, dataset: str) -> str | None:
         """이미지 경로에서 대응하는 마스크 경로 추론"""
@@ -584,7 +664,14 @@ class Anomalibs:
         return None
 
     def save_predictions_json(self, predictions, dataset: str, category: str):
-        output_dir = self.output_root / "predictions" / self.model_name / dataset / category
+        target_version = self.predict_config.get("version", None)
+        if target_version is not None:
+            version_tag = f"v{target_version}"
+        else:
+            latest = self.get_latest_version(dataset, category)
+            version_tag = f"v{latest}" if latest is not None else "v0"
+
+        output_dir = self.output_root / "predictions" / self.model_name / dataset / category / version_tag
         output_dir.mkdir(parents=True, exist_ok=True)
 
         results = []
@@ -623,12 +710,19 @@ class Anomalibs:
         get_inference_logger().info(f"Saved predictions JSON: {json_path}")
 
     def get_all_categories(self) -> list[tuple[str, str]]:
-        """Get list of (dataset, category) tuples from DATASETS."""
-        return [
+        """Get list of (dataset, category) tuples from DATASETS.
+
+        data.categories가 설정되어 있으면 해당 카테고리만 반환.
+        """
+        config_categories = self.config.get("data", {}).get("categories", None)
+        all_cats = [
             (dataset, category)
             for dataset in self.loader.datasets_to_run
             for category in self.loader.get_categories(dataset)
         ]
+        if config_categories:
+            all_cats = [(d, c) for d, c in all_cats if c in config_categories]
+        return all_cats
 
     def get_trained_categories(self, filter_by_config: bool = True) -> list[tuple[str, str]]:
         """Get list of (dataset, category) tuples that have trained checkpoints.
@@ -645,6 +739,9 @@ class Anomalibs:
         # YAML에서 지정한 datasets
         config_datasets = set(self.loader.datasets_to_run) if filter_by_config else None
 
+        # YAML에서 지정한 categories
+        config_categories = set(self.config.get("data", {}).get("categories", []) or [])
+
         trained = []
         for dataset_dir in sorted(model_path.iterdir()):
             if not dataset_dir.is_dir():
@@ -659,11 +756,16 @@ class Anomalibs:
                 if not category_dir.is_dir():
                     continue
                 category = category_dir.name
-                # 모든 버전 폴더에서 체크포인트 찾기
+
+                # categories 필터링
+                if config_categories and category not in config_categories:
+                    continue
+
+                # 모든 버전 폴더에서 체크포인트 찾기 (.ckpt 또는 .pt)
                 has_checkpoint = False
                 for version_dir in category_dir.iterdir():
                     if version_dir.is_dir() and version_dir.name.startswith("v"):
-                        if (version_dir / "model.ckpt").exists():
+                        if (version_dir / "model.ckpt").exists() or (version_dir / "model.pt").exists():
                             has_checkpoint = True
                             break
                 if has_checkpoint:
