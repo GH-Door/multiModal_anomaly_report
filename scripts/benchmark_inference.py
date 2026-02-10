@@ -50,13 +50,14 @@ class BenchmarkResult:
     min_ms: float
     max_ms: float
     throughput: float  # images/second
+    total_time_s: float = 0.0  # total benchmark time in seconds
     memory_mb: Optional[float] = None
 
     def __str__(self) -> str:
         return (
             f"{self.name}: {self.mean_ms:.2f} ± {self.std_ms:.2f} ms "
             f"(min: {self.min_ms:.2f}, max: {self.max_ms:.2f}) "
-            f"[{self.throughput:.1f} img/s]"
+            f"[{self.throughput:.1f} img/s, total: {self.total_time_s:.1f}s]"
         )
 
 
@@ -89,6 +90,9 @@ def benchmark_function(
     Returns:
         BenchmarkResult with timing statistics
     """
+    # Track total time including warmup
+    total_start = time.perf_counter()
+
     # Warmup
     for _ in range(warmup):
         _ = func(input_data)
@@ -103,6 +107,9 @@ def benchmark_function(
         end = time.perf_counter()
         times.append((end - start) * 1000)  # Convert to ms
 
+    total_end = time.perf_counter()
+    total_time_s = total_end - total_start
+
     times = np.array(times)
     memory_mb = get_memory_usage_mb()
 
@@ -113,6 +120,7 @@ def benchmark_function(
         min_ms=float(times.min()),
         max_ms=float(times.max()),
         throughput=1000.0 / times.mean(),  # images per second
+        total_time_s=total_time_s,
         memory_mb=memory_mb,
     )
 
@@ -309,14 +317,14 @@ def create_dummy_image(size: Tuple[int, int] = (512, 512)) -> np.ndarray:
 def print_results_table(results: Dict[str, List[BenchmarkResult]]):
     """Print results in a formatted table."""
     print()
-    print("=" * 100)
+    print("=" * 115)
     print("BENCHMARK RESULTS")
-    print("=" * 100)
+    print("=" * 115)
 
     # Header
-    print(f"{'Model':<40} {'Format':<12} {'Mean (ms)':<12} {'Std (ms)':<10} "
-          f"{'Throughput':<12} {'Speedup':<10}")
-    print("-" * 100)
+    print(f"{'Model':<35} {'Format':<12} {'Mean (ms)':<12} {'Std (ms)':<10} "
+          f"{'Throughput':<12} {'Total (s)':<10} {'Speedup':<10}")
+    print("-" * 115)
 
     for model_key, model_results in results.items():
         base_time = None
@@ -329,36 +337,42 @@ def print_results_table(results: Dict[str, List[BenchmarkResult]]):
             speedup_str = f"{speedup:.2f}x" if speedup != 1.0 else "baseline"
 
             if i == 0:
-                print(f"{model_key:<40} {result.name:<12} {result.mean_ms:<12.2f} "
-                      f"{result.std_ms:<10.2f} {result.throughput:<12.1f} {speedup_str:<10}")
+                print(f"{model_key:<35} {result.name:<12} {result.mean_ms:<12.2f} "
+                      f"{result.std_ms:<10.2f} {result.throughput:<12.1f} "
+                      f"{result.total_time_s:<10.1f} {speedup_str:<10}")
             else:
-                print(f"{'':<40} {result.name:<12} {result.mean_ms:<12.2f} "
-                      f"{result.std_ms:<10.2f} {result.throughput:<12.1f} {speedup_str:<10}")
+                print(f"{'':<35} {result.name:<12} {result.mean_ms:<12.2f} "
+                      f"{result.std_ms:<10.2f} {result.throughput:<12.1f} "
+                      f"{result.total_time_s:<10.1f} {speedup_str:<10}")
 
         print()
 
-    print("=" * 100)
+    print("=" * 115)
 
 
 def print_summary(results: Dict[str, List[BenchmarkResult]]):
     """Print summary statistics."""
     all_ckpt = []
     all_onnx = []
+    total_ckpt_time = 0.0
+    total_onnx_time = 0.0
 
     for model_results in results.values():
         for result in model_results:
             if "ckpt" in result.name.lower() or "checkpoint" in result.name.lower():
                 all_ckpt.append(result.mean_ms)
+                total_ckpt_time += result.total_time_s
             elif "onnx" in result.name.lower():
                 all_onnx.append(result.mean_ms)
+                total_onnx_time += result.total_time_s
 
     print("\nSUMMARY")
     print("-" * 50)
 
     if all_ckpt:
-        print(f"Checkpoint average: {np.mean(all_ckpt):.2f} ms ({1000/np.mean(all_ckpt):.1f} img/s)")
+        print(f"Checkpoint: {np.mean(all_ckpt):.2f} ms/img ({1000/np.mean(all_ckpt):.1f} img/s), total {total_ckpt_time:.1f}s")
     if all_onnx:
-        print(f"ONNX average: {np.mean(all_onnx):.2f} ms ({1000/np.mean(all_onnx):.1f} img/s)")
+        print(f"ONNX:       {np.mean(all_onnx):.2f} ms/img ({1000/np.mean(all_onnx):.1f} img/s), total {total_onnx_time:.1f}s")
 
     if all_ckpt and all_onnx:
         speedup = np.mean(all_ckpt) / np.mean(all_onnx)

@@ -99,8 +99,9 @@ def export_to_onnx(
         from anomalib.models import Patchcore
 
         print(f"  Loading checkpoint: {checkpoint_path}")
-        model = Patchcore.load_from_checkpoint(str(checkpoint_path))
+        model = Patchcore.load_from_checkpoint(str(checkpoint_path), map_location="cpu")
         model.eval()
+        model = model.cpu()  # Ensure model is on CPU for export
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
