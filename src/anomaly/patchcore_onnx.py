@@ -104,6 +104,10 @@ class PatchCoreOnnx(PerClassAnomalyModel):
             providers=providers,
         )
 
+        # Print actual provider being used
+        actual_providers = self._session.get_providers()
+        print(f"  ONNX Providers: {actual_providers}")
+
         self._input_name = self._session.get_inputs()[0].name
         self._output_name = self._session.get_outputs()[0].name
 
