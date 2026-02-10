@@ -13,7 +13,18 @@ Usage:
     # Predict
     python scripts/train_anomalib.py --mode predict
 """
+from __future__ import annotations
+
 import os
+import sys
+from pathlib import Path
+
+# Add project root to path
+SCRIPT_PATH = Path(__file__).resolve()
+PROJ_ROOT = SCRIPT_PATH.parents[1]
+if str(PROJ_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJ_ROOT))
+
 os.environ["TQDM_DISABLE"] = "1"
 
 import tqdm
