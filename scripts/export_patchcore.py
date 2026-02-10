@@ -26,7 +26,11 @@ if str(PROJ_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJ_ROOT))
 
 
-def find_patchcore_checkpoints(checkpoint_dir: Path, verbose: bool = False) -> List[Tuple[str, str, Path]]:
+def find_patchcore_checkpoints(
+    checkpoint_dir: Path,
+    version: int | None = None,
+    verbose: bool = False,
+) -> List[Tuple[str, str, Path]]:
     """Find PatchCore checkpoints.
 
     Expected structure:
@@ -34,6 +38,11 @@ def find_patchcore_checkpoints(checkpoint_dir: Path, verbose: bool = False) -> L
             GoodsAD/
                 cigarette_box/
                     v0/model.ckpt
+
+    Args:
+        checkpoint_dir: Root checkpoint directory
+        version: Specific version to use (None = latest with model.ckpt)
+        verbose: Print debug output
 
     Returns:
         List of (dataset, category, checkpoint_path)
@@ -47,6 +56,7 @@ def find_patchcore_checkpoints(checkpoint_dir: Path, verbose: bool = False) -> L
 
     if verbose:
         print(f"[DEBUG] Searching in: {patchcore_dir}")
+        print(f"[DEBUG] Version: {version if version is not None else 'auto (latest)'}")
 
     for dataset_dir in sorted(patchcore_dir.iterdir()):
         if not dataset_dir.is_dir() or dataset_dir.name.startswith("."):
@@ -56,13 +66,24 @@ def find_patchcore_checkpoints(checkpoint_dir: Path, verbose: bool = False) -> L
 
         if verbose:
             print(f"[DEBUG] Dataset: {dataset_dir.name}")
-            print(f"[DEBUG]   Categories: {[c.name for c in dataset_dir.iterdir() if c.is_dir()]}")
 
         for category_dir in sorted(dataset_dir.iterdir()):
             if not category_dir.is_dir() or category_dir.name.startswith("."):
                 continue
 
-            # Find latest version
+            # If specific version requested, use it strictly (no fallback)
+            if version is not None:
+                ver_dir = category_dir / f"v{version}"
+                ckpt_path = ver_dir / "model.ckpt"
+                if ckpt_path.exists():
+                    checkpoints.append((dataset_dir.name, category_dir.name, ckpt_path))
+                    if verbose:
+                        print(f"[DEBUG]   {category_dir.name}: v{version} ✓")
+                elif verbose:
+                    print(f"[DEBUG]   {category_dir.name}: v{version} ✗ (model.ckpt not found)")
+                continue
+
+            # Auto mode (version=None): find latest version with model.ckpt
             versions = []
             for v_dir in category_dir.iterdir():
                 if v_dir.is_dir() and v_dir.name.startswith("v"):
@@ -71,19 +92,20 @@ def find_patchcore_checkpoints(checkpoint_dir: Path, verbose: bool = False) -> L
                     except ValueError:
                         continue
 
-            if verbose:
-                print(f"[DEBUG]   {category_dir.name}: versions={[v[0] for v in versions]}")
-
             if not versions:
                 continue
 
-            latest_version_dir = max(versions, key=lambda x: x[0])[1]
-            ckpt_path = latest_version_dir / "model.ckpt"
-
-            if ckpt_path.exists():
-                checkpoints.append((dataset_dir.name, category_dir.name, ckpt_path))
-            elif verbose:
-                print(f"[DEBUG]     model.ckpt not found at: {ckpt_path}")
+            versions_sorted = sorted(versions, key=lambda x: x[0], reverse=True)
+            for ver_num, ver_dir in versions_sorted:
+                candidate = ver_dir / "model.ckpt"
+                if candidate.exists():
+                    checkpoints.append((dataset_dir.name, category_dir.name, candidate))
+                    if verbose:
+                        print(f"[DEBUG]   {category_dir.name}: v{ver_num} ✓")
+                    break
+            else:
+                if verbose:
+                    print(f"[DEBUG]   {category_dir.name}: no model.ckpt found")
 
     return checkpoints
 
@@ -288,18 +310,21 @@ def main():
     # Load config if provided
     config_datasets = None
     config_categories = None
+    config_version = None
     if args.config:
         from src.utils.loaders import load_config
         config = load_config(args.config)
         config_datasets = config.get("data", {}).get("datasets", None)
         config_categories = config.get("data", {}).get("categories", None)
+        config_version = config.get("predict", {}).get("version", None)
         print(f"Using config: {args.config}")
         print(f"  Datasets: {config_datasets}")
         print(f"  Categories: {config_categories}")
+        print(f"  Version: {config_version if config_version is not None else 'auto (latest)'}")
         print()
 
     # Find checkpoints
-    checkpoints = find_patchcore_checkpoints(checkpoint_dir, verbose=args.verbose)
+    checkpoints = find_patchcore_checkpoints(checkpoint_dir, version=config_version, verbose=args.verbose)
 
     if not checkpoints:
         print(f"No PatchCore checkpoints found in {checkpoint_dir}")
