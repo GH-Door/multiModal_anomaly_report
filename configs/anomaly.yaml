@@ -4,7 +4,7 @@
 data:
   root: /content/drive/MyDrive/likelion/final_project/MMAD
   output_root: /content/drive/MyDrive/likelion/final_project/MMAD/checkpoints/patchcore_anomalib/
-  image_size: [224, 224]  # PatchCore default
+  image_size: [700, 700]  # 학습 시 사용한 크기
   datasets: ["GoodsAD", "MVTec-LOCO"]  # ["MVTec-AD", "VisA", "GoodsAD", "MVTec-LOCO"]
   categories:  # null: 전체 카테고리 | 리스트: 특정 카테고리만
     - breakfast_box

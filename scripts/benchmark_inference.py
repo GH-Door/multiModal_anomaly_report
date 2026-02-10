@@ -125,7 +125,7 @@ def benchmark_function(
     )
 
 
-def load_checkpoint_model(checkpoint_path: Path, device: str = "cpu"):
+def load_checkpoint_model(checkpoint_path: Path, device: str = "cpu", input_size: Tuple[int, int] = (224, 224)):
     """Load PatchCore model from Lightning checkpoint.
 
     Returns:
@@ -138,7 +138,7 @@ def load_checkpoint_model(checkpoint_path: Path, device: str = "cpu"):
         raise ImportError(f"anomalib or torch not installed: {e}")
 
     print(f"  Loading checkpoint: {checkpoint_path}")
-    model = Patchcore.load_from_checkpoint(str(checkpoint_path))
+    model = Patchcore.load_from_checkpoint(str(checkpoint_path), map_location="cpu")
     model.eval()
 
     if device == "cuda" and torch.cuda.is_available():
@@ -151,7 +151,7 @@ def load_checkpoint_model(checkpoint_path: Path, device: str = "cpu"):
         import cv2
 
         # Preprocess
-        img = cv2.resize(image, (224, 224))
+        img = cv2.resize(image, (input_size[1], input_size[0]))  # cv2 uses (width, height)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -199,15 +199,22 @@ def load_onnx_model(onnx_path: Path, device: str = "cpu"):
         providers=providers,
     )
 
-    input_name = session.get_inputs()[0].name
+    input_info = session.get_inputs()[0]
+    input_name = input_info.name
     output_names = [o.name for o in session.get_outputs()]
+
+    # Get input size from ONNX model (shape: [batch, channels, height, width])
+    input_shape = input_info.shape
+    onnx_height = input_shape[2] if isinstance(input_shape[2], int) else 224
+    onnx_width = input_shape[3] if isinstance(input_shape[3], int) else 224
+    print(f"  ONNX input size: {onnx_height}x{onnx_width}")
 
     def predict_fn(image: np.ndarray):
         """Predict function for ONNX model."""
         import cv2
 
-        # Preprocess
-        img = cv2.resize(image, (224, 224))
+        # Preprocess - use size from ONNX model
+        img = cv2.resize(image, (onnx_width, onnx_height))  # cv2 uses (width, height)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -443,8 +450,24 @@ def main():
         default=None,
         help="Maximum number of models to benchmark",
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Config file to read image_size from",
+    )
 
     args = parser.parse_args()
+
+    # Load config if provided
+    model_input_size = tuple(args.image_size)
+    if args.config:
+        from src.utils.loaders import load_config
+        config = load_config(args.config)
+        config_image_size = config.get("data", {}).get("image_size", None)
+        if config_image_size:
+            model_input_size = tuple(config_image_size)
+            print(f"Using image_size from config: {model_input_size}")
 
     # Prepare model pairs
     if args.checkpoint or args.onnx:
@@ -477,11 +500,11 @@ def main():
     print(f"Found {len(model_pairs)} model(s) to benchmark")
     print(f"Warmup: {args.warmup}, Iterations: {args.iterations}")
     print(f"Device: {args.device}")
-    print(f"Image size: {args.image_size[0]}x{args.image_size[1]}")
+    print(f"Model input size: {model_input_size[0]}x{model_input_size[1]}")
     print()
 
-    # Create dummy input
-    dummy_image = create_dummy_image(tuple(args.image_size))
+    # Create dummy input (larger than model input, will be resized)
+    dummy_image = create_dummy_image((max(model_input_size[0], 512), max(model_input_size[1], 512)))
 
     # Run benchmarks
     all_results: Dict[str, List[BenchmarkResult]] = {}
@@ -497,7 +520,7 @@ def main():
         # Benchmark checkpoint
         if ckpt_path:
             try:
-                model, predict_fn = load_checkpoint_model(ckpt_path, args.device)
+                model, predict_fn = load_checkpoint_model(ckpt_path, args.device, input_size=model_input_size)
                 result = benchmark_function(
                     predict_fn,
                     dummy_image,
