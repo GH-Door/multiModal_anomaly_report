@@ -242,12 +242,6 @@ def run_experiment(cfg: ExperimentConfig) -> Path:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    template_type = "Similar_template" if cfg.similar_template else "Random_template"
-    ad_suffix = f"_with_{cfg.ad_model}" if cfg.ad_model else ""
-    llm_safe = cfg.llm.replace("/", "_").replace("\\", "_")
-    output_name = f"answers_{cfg.few_shot}_shot_{llm_safe}_{template_type}{ad_suffix}"
-    answers_json_path = output_dir / f"{output_name}.json"
-
     # Load dataset & sampling (AD inference 전에 먼저 수행)
     mmad_data = load_mmad_data(mmad_json)
     image_paths = list(mmad_data.keys())
@@ -260,6 +254,13 @@ def run_experiment(cfg: ExperimentConfig) -> Path:
     # max_images는 샘플링 이후에 적용
     if cfg.max_images:
         image_paths = image_paths[:cfg.max_images]
+
+    template_type = "Similar_template" if cfg.similar_template else "Random_template"
+    ad_suffix = f"_with_{cfg.ad_model}" if cfg.ad_model else ""
+    llm_safe = cfg.llm.replace("/", "_").replace("\\", "_")
+    img_count = f"_{len(image_paths)}img"
+    output_name = f"answers_{cfg.few_shot}_shot_{llm_safe}_{template_type}{ad_suffix}{img_count}"
+    answers_json_path = output_dir / f"{output_name}.json"
 
     print("=" * 60)
     print("MMAD Experiment Runner")
