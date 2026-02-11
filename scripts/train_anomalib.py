@@ -14,7 +14,9 @@ def _patched_tqdm_init(self, *args, **kwargs):
 tqdm_class.__init__ = _patched_tqdm_init
 tqdm.tqdm = tqdm_class
 
+import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -786,3 +788,30 @@ class Anomalibs:
 
         get_inference_logger().info(f"predict_all completed: {total} categories")
         return all_predictions
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Anomalib Training/Prediction")
+    parser.add_argument("--config", type=str, default="configs/anomaly.yaml")
+    parser.add_argument("--mode", type=str, default="fit", choices=["fit", "predict"])
+    parser.add_argument("--dataset", type=str, default=None)
+    parser.add_argument("--category", type=str, default=None)
+    parser.add_argument("--save-json", action="store_true")
+    args = parser.parse_args()
+
+    runner = Anomalibs(config_path=args.config)
+
+    if args.mode == "fit":
+        if args.dataset and args.category:
+            runner.fit(args.dataset, args.category)
+        else:
+            runner.fit_all()
+    elif args.mode == "predict":
+        if args.dataset and args.category:
+            runner.predict(args.dataset, args.category, save_json=args.save_json)
+        else:
+            runner.predict_all(save_json=args.save_json)
+
+
+if __name__ == "__main__":
+    main()
