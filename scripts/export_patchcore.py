@@ -124,7 +124,7 @@ def export_model(
         from anomalib.models import Patchcore
 
         print(f"  Loading: {checkpoint_path}")
-        model = Patchcore.load_from_checkpoint(str(checkpoint_path), map_location="cpu")
+        model = Patchcore.load_from_checkpoint(str(checkpoint_path), map_location="cpu", weights_only=False)
         model.eval()
 
         inner = model.model

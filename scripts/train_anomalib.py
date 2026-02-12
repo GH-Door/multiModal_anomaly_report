@@ -541,7 +541,7 @@ class Anomalibs:
             model.model.num_neighbors = pt_data.get("n_neighbors", 9)
         elif ckpt_path is not None:
             get_inference_logger().info(f"Loading checkpoint: {ckpt_path}")
-            model = model.__class__.load_from_checkpoint(str(ckpt_path))
+            model = model.__class__.load_from_checkpoint(str(ckpt_path), weights_only=False)
 
         # WinCLIP requires class name for text embeddings
         if self.model_name == "winclip":

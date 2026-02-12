@@ -87,7 +87,7 @@ def load_checkpoint_model(checkpoint_path: Path, device: str, input_size: Tuple[
     from anomalib.models import Patchcore
 
     print(f"  Loading checkpoint: {checkpoint_path}")
-    model = Patchcore.load_from_checkpoint(str(checkpoint_path), map_location="cpu")
+    model = Patchcore.load_from_checkpoint(str(checkpoint_path), map_location="cpu", weights_only=False)
     model.eval()
 
     if device == "cuda" and torch.cuda.is_available():

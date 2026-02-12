@@ -482,7 +482,7 @@ def visualize_predictions_from_runner(
             model.model.coreset_sampling_ratio = pt_data.get("coreset_ratio", 0.1)
             model.model.num_neighbors = pt_data.get("n_neighbors", 9)
         elif ckpt_path:
-            model = model.__class__.load_from_checkpoint(str(ckpt_path))
+            model = model.__class__.load_from_checkpoint(str(ckpt_path), weights_only=False)
 
         model.eval()
         model.to(runner.device)

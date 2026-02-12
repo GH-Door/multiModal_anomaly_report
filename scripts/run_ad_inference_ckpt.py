@@ -150,7 +150,7 @@ class PatchCoreCheckpointManager:
             if ckpt_path is None:
                 raise FileNotFoundError(f"Checkpoint not found for {key}")
 
-            model = Patchcore.load_from_checkpoint(str(ckpt_path), map_location="cpu")
+            model = Patchcore.load_from_checkpoint(str(ckpt_path), map_location="cpu", weights_only=False)
             model.eval()
             model.to(self.device)
             self._models[key] = model
@@ -158,16 +158,19 @@ class PatchCoreCheckpointManager:
         return self._models[key]
 
     def _preprocess(self, image: np.ndarray) -> torch.Tensor:
-        """Preprocess image for model input."""
+        """Preprocess image for model input.
+
+        Note: Model's PreProcessor applies Normalize internally,
+        so we only do resize + BGR->RGB + /255 here.
+        """
         h, w = self.input_size
 
         img = cv2.resize(image, (w, h))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
 
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        img = (img - mean) / std
+        # NOTE: Do NOT apply ImageNet normalize here!
+        # Model's PreProcessor will apply Normalize.
 
         img = img.transpose(2, 0, 1)
         tensor = torch.from_numpy(img).unsqueeze(0).float()
