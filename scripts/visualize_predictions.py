@@ -126,12 +126,18 @@ def main():
         filtered = []
         for p in predictions:
             img_path = p.get("image_path", "")
-            for img_name in args.images:
-                if img_name in img_path:
+            rel_path = extract_relative_path(img_path)
+            for img_query in args.images:
+                # Support: absolute path, relative path, or partial filename
+                img_query_rel = extract_relative_path(img_query)
+                if (img_query == img_path or           # exact match
+                    img_query_rel == rel_path or       # relative path match
+                    img_query in img_path or           # partial match
+                    img_query_rel in rel_path):        # partial relative match
                     filtered.append(p)
                     break
         predictions = filtered
-        print(f"Filtered to {len(predictions)} matching images: {args.images}")
+        print(f"Filtered to {len(predictions)} matching images")
 
     # Filter anomalies if requested
     if args.only_anomaly:
