@@ -204,6 +204,7 @@ class PatchCoreCheckpointManager:
         # Extract results
         anomaly_map = getattr(outputs, "anomaly_map", None)
         pred_score = getattr(outputs, "pred_score", None)
+        pred_label = getattr(outputs, "pred_label", None)
 
         if anomaly_map is not None:
             # Resize to original size
@@ -217,7 +218,8 @@ class PatchCoreCheckpointManager:
             anomaly_map = anomaly_map[0, 0].cpu().numpy()
 
         anomaly_score = float(pred_score[0].cpu()) if pred_score is not None else float(anomaly_map.max())
-        is_anomaly = anomaly_score > self.threshold
+        # pred_label: anomalib이 학습 시 F1 최적화로 계산한 threshold 적용 결과
+        is_anomaly = bool(pred_label[0].cpu()) if pred_label is not None else (anomaly_score > self.threshold)
 
         return {
             "anomaly_score": anomaly_score,

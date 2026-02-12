@@ -618,6 +618,9 @@ class Anomalibs:
         self.last_inference_time = inference_time
         self.last_n_images = n_images
 
+        # Compute and print metrics
+        self._print_metrics(all_predictions, dataset, category)
+
         # save json
         if save_json is None:
             save_json = self.output_config.get("save_json", False)
@@ -625,6 +628,41 @@ class Anomalibs:
             self.save_predictions_json(all_predictions, dataset, category)
 
         return all_predictions
+
+    def _print_metrics(self, predictions: list, dataset: str, category: str):
+        """Compute and print evaluation metrics."""
+        import numpy as np
+        from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score
+
+        # Collect predictions
+        y_true = []
+        y_score = []
+        for batch in predictions:
+            if batch.gt_label is not None and batch.pred_score is not None:
+                y_true.extend(batch.gt_label.numpy().tolist())
+                y_score.extend(batch.pred_score.numpy().tolist())
+
+        if not y_true or len(set(y_true)) < 2:
+            print(f"  [SKIP] Not enough labels for metrics (got {len(set(y_true))} classes)")
+            return
+
+        y_true = np.array(y_true)
+        y_score = np.array(y_score)
+        y_pred = (y_score > 0.5).astype(int)
+
+        # Compute metrics
+        auroc = roc_auc_score(y_true, y_score)
+        f1 = f1_score(y_true, y_pred, zero_division=0)
+        precision = precision_score(y_true, y_pred, zero_division=0)
+        recall = recall_score(y_true, y_pred, zero_division=0)
+
+        # Print results
+        print(f"\n  === {dataset}/{category} Metrics ===")
+        print(f"  Samples: {len(y_true)} (Normal: {sum(y_true==0)}, Anomaly: {sum(y_true==1)})")
+        print(f"  Image AUROC: {auroc:.4f}")
+        print(f"  F1 Score:    {f1:.4f}")
+        print(f"  Precision:   {precision:.4f}")
+        print(f"  Recall:      {recall:.4f}")
 
     def get_mask_path(self, image_path: str, dataset: str) -> str | None:
         """이미지 경로에서 대응하는 마스크 경로 추론"""
@@ -776,28 +814,56 @@ class Anomalibs:
         get_train_logger().info(f"fit_all completed: {total} categories")
 
     def predict_all(self, save_json: bool = None):
+        import numpy as np
+        from sklearn.metrics import roc_auc_score
+
         categories = self.get_trained_categories()
         total = len(categories)
         get_inference_logger().info(f"predict_all: {total} trained categories")
 
         all_predictions = {}
+        summary_results = []
+
         for idx, (dataset, category) in enumerate(categories, 1):
             print(f"\n[{idx}/{total}] Predicting: {dataset}/{category}...")
             self.last_inference_time = 0.0
             self.last_n_images = 0
             start = time.time()
             key = f"{dataset}/{category}"
-            all_predictions[key] = self.predict(dataset, category, save_json)
-            elapsed = time.time() - start
+            predictions = self.predict(dataset, category, save_json)
+            all_predictions[key] = predictions
+
+            # Collect metrics for summary
+            y_true, y_score = [], []
+            for batch in predictions:
+                if batch.gt_label is not None and batch.pred_score is not None:
+                    y_true.extend(batch.gt_label.numpy().tolist())
+                    y_score.extend(batch.pred_score.numpy().tolist())
+            if y_true and len(set(y_true)) >= 2:
+                auroc = roc_auc_score(np.array(y_true), np.array(y_score))
+                summary_results.append({"dataset": dataset, "category": category, "auroc": auroc, "n": len(y_true)})
+
             infer_t = self.last_inference_time
             n_img = self.last_n_images
             ms_per_img = (infer_t / n_img * 1000) if n_img > 0 else 0
-            msg = (
-                f"[{idx}/{total}] {dataset}/{category} done "
-                f"(inference: {infer_t:.2f}s, {ms_per_img:.1f}ms/img)"
-            )
+            msg = f"[{idx}/{total}] {dataset}/{category} done (inference: {infer_t:.2f}s, {ms_per_img:.1f}ms/img)"
             print(f"✓ {msg}")
             get_inference_logger().info(msg)
+
+        # Print summary table
+        if summary_results:
+            print("\n" + "=" * 60)
+            print("EVALUATION SUMMARY")
+            print("=" * 60)
+            print(f"{'Dataset':<15} {'Category':<20} {'AUROC':>10} {'Samples':>10}")
+            print("-" * 60)
+            for r in summary_results:
+                print(f"{r['dataset']:<15} {r['category']:<20} {r['auroc']:>10.4f} {r['n']:>10}")
+            avg_auroc = np.mean([r['auroc'] for r in summary_results])
+            total_samples = sum(r['n'] for r in summary_results)
+            print("-" * 60)
+            print(f"{'Average':<15} {'':<20} {avg_auroc:>10.4f} {total_samples:>10}")
+            print("=" * 60)
 
         get_inference_logger().info(f"predict_all completed: {total} categories")
         return all_predictions
