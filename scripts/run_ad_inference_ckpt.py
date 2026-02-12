@@ -20,7 +20,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Note: HF_HUB_OFFLINE removed - backbone needs internet on first run
+# Disable HuggingFace online checks after first download
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import cv2
 import numpy as np
@@ -101,7 +103,6 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
 
     Fast version: finds largest contour above threshold.
     """
-    import cv2 as cv
 
     h, w = anomaly_map.shape
     map_max = anomaly_map.max()
@@ -120,15 +121,15 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
     normalized = ((anomaly_map - map_min) / (map_max - map_min) * 255).astype(np.uint8)
 
     # Adaptive threshold: top 30% of values
-    _, binary = cv.threshold(normalized, int(255 * 0.7), 255, cv.THRESH_BINARY)
+    _, binary = cv2.threshold(normalized, int(255 * 0.7), 255, cv2.THRESH_BINARY)
 
     # Find contours
-    contours, _ = cv.findContours(binary, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
         # Fallback with lower threshold
-        _, binary = cv.threshold(normalized, int(255 * 0.5), 255, cv.THRESH_BINARY)
-        contours, _ = cv.findContours(binary, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+        _, binary = cv2.threshold(normalized, int(255 * 0.5), 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
         return {
@@ -140,8 +141,8 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
         }
 
     # Find largest contour (fast - no mask creation)
-    largest = max(contours, key=cv.contourArea)
-    area = cv.contourArea(largest)
+    largest = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(largest)
 
     if area < 10:
         return {
@@ -152,7 +153,7 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
             "area_ratio": 0.0,
         }
 
-    x, y, bw, bh = cv.boundingRect(largest)
+    x, y, bw, bh = cv2.boundingRect(largest)
     center_x = int(x + bw / 2)
     center_y = int(y + bh / 2)
 
