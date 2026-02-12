@@ -534,6 +534,10 @@ def main():
                 results.append(result_dict)
                 processed += 1
 
+                # Clear GPU cache periodically to prevent slowdown
+                if processed % 100 == 0 and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
             except Exception as e:
                 errors += 1
 
