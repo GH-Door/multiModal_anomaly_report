@@ -2,17 +2,32 @@
 """Visualize AD predictions: compare bbox with GT mask.
 
 Usage:
+    # Random samples
     python scripts/visualize_predictions.py \
         --predictions ad_predictions.json \
         --data-root /path/to/MMAD \
-        --output output/vis_compare.png \
+        --output output/vis.png \
         --num-samples 12
+
+    # Specific images
+    python scripts/visualize_predictions.py \
+        --predictions ad_predictions.json \
+        --data-root /path/to/MMAD \
+        --images 000.png 001.png
+
+    # Save percentage per class
+    python scripts/visualize_predictions.py \
+        --predictions ad_predictions.json \
+        --data-root /path/to/MMAD \
+        --save 0.1 \
+        --output output/vis_samples
 """
 from __future__ import annotations
 
 import argparse
 import json
 import random
+from collections import defaultdict
 from pathlib import Path
 
 import cv2
@@ -28,71 +43,135 @@ def extract_relative_path(image_path: str) -> str:
     return image_path
 
 
-def infer_mask_path(image_path: str, data_root: Path, debug: bool = False) -> Path | None:
-    """Infer GT mask path from image path.
+def get_class_from_path(image_path: str) -> str:
+    """Extract class name (dataset/category) from path."""
+    rel = extract_relative_path(image_path)
+    parts = Path(rel).parts
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    return "unknown"
 
-    GoodsAD: test/{defect}/xxx.jpg → ground_truth/{defect}/xxx.png
-    MVTec-LOCO: test/{defect}/xxx.png → ground_truth/{defect}/xxx/000.png
-    """
+
+def infer_mask_path(image_path: str, data_root: Path) -> Path | None:
+    """Infer GT mask path from image path."""
     rel_path = extract_relative_path(image_path)
     parts = Path(rel_path).parts
 
-    if debug:
-        print(f"    [DEBUG] rel_path: {rel_path}")
-        print(f"    [DEBUG] parts: {parts}")
-
-    # Skip normal images (no mask)
     if "good" in parts:
-        if debug:
-            print(f"    [DEBUG] Skipping normal image (good)")
         return None
 
-    # Need at least: dataset/category/test/defect_type/filename
     if len(parts) < 5:
-        if debug:
-            print(f"    [DEBUG] Not enough parts: {len(parts)}")
         return None
 
     dataset = parts[0]
     category = parts[1]
     defect_type = parts[3]
-    filename = parts[4]
-    stem = Path(filename).stem
+    stem = Path(parts[4]).stem
 
-    if debug:
-        print(f"    [DEBUG] dataset={dataset}, category={category}, defect_type={defect_type}, stem={stem}")
+    # GoodsAD style
+    mask_path = data_root / dataset / category / "ground_truth" / defect_type / f"{stem}.png"
+    if mask_path.exists():
+        return mask_path
 
-    # Try different mask path patterns
-    candidates = []
-
-    # Pattern 1: GoodsAD style - ground_truth/{defect}/xxx.png
-    candidates.append(
-        data_root / dataset / category / "ground_truth" / defect_type / f"{stem}.png"
-    )
-
-    # Pattern 2: MVTec-LOCO style - ground_truth/{defect}/xxx/000.png (nested folder)
+    # MVTec-LOCO style (nested folder)
     mask_dir = data_root / dataset / category / "ground_truth" / defect_type / stem
     if mask_dir.exists() and mask_dir.is_dir():
         mask_files = sorted(mask_dir.glob("*.png"))
         if mask_files:
-            candidates.insert(0, mask_files[0])
+            return mask_files[0]
 
-    # Pattern 3: MVTec-AD style - ground_truth/{defect}/xxx_mask.png
-    candidates.append(
-        data_root / dataset / category / "ground_truth" / defect_type / f"{stem}_mask.png"
-    )
-
-    if debug:
-        print(f"    [DEBUG] Candidates:")
-        for c in candidates:
-            print(f"      - {c} (exists: {c.exists()})")
-
-    # Return first existing
-    for c in candidates:
-        if c.exists():
-            return c
+    # MVTec-AD style
+    mask_path = data_root / dataset / category / "ground_truth" / defect_type / f"{stem}_mask.png"
+    if mask_path.exists():
+        return mask_path
 
     return None
+
+
+def visualize_single(pred: dict, data_root: Path) -> np.ndarray | None:
+    """Create visualization for single prediction."""
+    img_path = extract_relative_path(pred.get("image_path", ""))
+    full_img_path = data_root / img_path
+
+    if not full_img_path.exists():
+        return None
+
+    img = cv2.imread(str(full_img_path))
+    if img is None:
+        return None
+
+    h, w = img.shape[:2]
+
+    # Draw bbox on image
+    img_with_bbox = img.copy()
+    defect_loc = pred.get("defect_location", {})
+    bbox = defect_loc.get("bbox") if defect_loc else None
+
+    if bbox:
+        x_min, y_min, x_max, y_max = bbox
+        x_min, y_min = max(0, x_min), max(0, y_min)
+        x_max, y_max = min(w, x_max), min(h, y_max)
+        cv2.rectangle(img_with_bbox, (x_min, y_min), (x_max, y_max), (0, 0, 255), 3)
+
+        # Draw center
+        center = defect_loc.get("center")
+        if center:
+            cx, cy = int(center[0]), int(center[1])
+            cv2.circle(img_with_bbox, (cx, cy), 8, (0, 255, 255), -1)
+
+    # Add score/label text
+    score = pred.get("anomaly_score", pred.get("pred_score", 0))
+    pred_label = pred.get("pred_label", pred.get("is_anomaly", 0))
+    is_anomaly = pred_label == 1 or pred_label is True
+    label = "ANOMALY" if is_anomaly else "NORMAL"
+    color = (0, 0, 255) if is_anomaly else (0, 255, 0)
+
+    cv2.putText(img_with_bbox, f"{label} ({score:.2f})", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+    if bbox:
+        region = defect_loc.get("region", "")
+        cv2.putText(img_with_bbox, f"region: {region}", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    else:
+        cv2.putText(img_with_bbox, "no defect", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
+
+    # Load GT mask
+    mask_path = infer_mask_path(pred.get("image_path", ""), data_root)
+
+    mask_vis = None
+    if mask_path and mask_path.exists():
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask is not None:
+            mask = cv2.resize(mask, (w, h))
+            mask_color = np.zeros_like(img)
+            mask_color[:, :, 2] = mask
+            mask_vis = cv2.addWeighted(img, 0.7, mask_color, 0.3, 0)
+            cv2.putText(mask_vis, "GT MASK", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+    if mask_vis is None:
+        if "/good/" in img_path:
+            mask_vis = img.copy()
+            cv2.putText(mask_vis, "NORMAL (no defect)", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        else:
+            mask_vis = np.zeros_like(img)
+            cv2.putText(mask_vis, "MASK NOT FOUND", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 128), 2)
+
+    # Combine
+    combined = np.hstack([img_with_bbox, mask_vis])
+
+    # Path info
+    info_bar = np.zeros((40, combined.shape[1], 3), dtype=np.uint8)
+    short_path = "/".join(Path(img_path).parts[-3:])
+    cv2.putText(info_bar, short_path, (10, 28),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+    combined = np.vstack([combined, info_bar])
+
+    return combined
 
 
 def main():
@@ -103,8 +182,10 @@ def main():
     parser.add_argument("--num-samples", type=int, default=12)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--only-anomaly", action="store_true", help="Only sample anomalies")
-    parser.add_argument("--images", type=str, nargs="+", default=None, help="Specific image filenames to visualize")
-    parser.add_argument("--debug", action="store_true", help="Print debug info")
+    parser.add_argument("--images", type=str, nargs="+", default=None,
+                        help="Specific images (filename, path, or class name)")
+    parser.add_argument("--save", type=float, default=None,
+                        help="Save ratio per class (e.g., 0.1 = 10%% of each class)")
 
     args = parser.parse_args()
     random.seed(args.seed)
@@ -114,35 +195,82 @@ def main():
         predictions = json.load(f)
 
     print(f"Loaded {len(predictions)} predictions")
-    print(f"Data root: {args.data_root}")
 
-    # Debug: check fields and sample
-    if predictions:
-        print(f"Fields: {list(predictions[0].keys())}")
-        print(f"Sample image_path: {predictions[0].get('image_path', 'N/A')[:100]}")
+    data_root = Path(args.data_root)
 
+    # Mode: --save (per-class percentage saving)
+    if args.save is not None:
+        print(f"\nSave mode: {args.save*100:.0f}% per class")
+
+        # Group by class
+        by_class = defaultdict(list)
+        for p in predictions:
+            cls = get_class_from_path(p.get("image_path", ""))
+            by_class[cls].append(p)
+
+        # Filter by --images if provided (class name filter)
+        if args.images:
+            filtered_classes = {}
+            for cls, preds in by_class.items():
+                for img_query in args.images:
+                    if img_query in cls:
+                        filtered_classes[cls] = preds
+                        break
+            by_class = filtered_classes
+            print(f"Filtered to classes: {list(by_class.keys())}")
+
+        # Filter anomalies if requested
+        if args.only_anomaly:
+            for cls in by_class:
+                by_class[cls] = [p for p in by_class[cls]
+                                 if p.get("is_anomaly") or p.get("pred_label") == 1]
+
+        output_dir = Path(args.output)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        total_saved = 0
+        for cls, preds in sorted(by_class.items()):
+            if not preds:
+                continue
+
+            num_save = max(1, int(len(preds) * args.save))
+            sampled = random.sample(preds, min(num_save, len(preds)))
+
+            cls_name = cls.replace("/", "_")
+            print(f"\n[{cls}] Saving {len(sampled)}/{len(preds)} images...")
+
+            for i, pred in enumerate(sampled):
+                vis = visualize_single(pred, data_root)
+                if vis is not None:
+                    # Resize for consistency
+                    scale = 800 / vis.shape[1]
+                    vis = cv2.resize(vis, (800, int(vis.shape[0] * scale)))
+
+                    filename = Path(pred.get("image_path", "")).stem
+                    out_path = output_dir / f"{cls_name}_{filename}.png"
+                    cv2.imwrite(str(out_path), vis)
+                    total_saved += 1
+
+        print(f"\n{'='*50}")
+        print(f"Total saved: {total_saved} images to {output_dir}")
+        return
+
+    # Mode: specific images or random sampling
     # Filter by specific images if provided
     if args.images:
         filtered = []
-        # Debug: show what we're looking for
-        print(f"Looking for images: {args.images}")
-        for img_query in args.images:
-            img_query_rel = extract_relative_path(img_query)
-            print(f"  Query relative: {img_query_rel}")
-
         for p in predictions:
             img_path = p.get("image_path", "")
             rel_path = extract_relative_path(img_path)
             for img_query in args.images:
                 img_query_rel = extract_relative_path(img_query)
-                # Support: exact, relative, or partial match
                 matched = (
                     img_query == img_path or
                     img_query_rel == rel_path or
                     img_query in img_path or
                     img_query_rel in rel_path or
-                    rel_path in img_query or
-                    rel_path in img_query_rel
+                    rel_path.endswith(img_query) or
+                    img_query in rel_path
                 )
                 if matched:
                     filtered.append(p)
@@ -162,135 +290,23 @@ def main():
         print("No predictions to visualize")
         return
 
-    # Sample (skip if specific images provided)
-    if args.images:
-        sampled = predictions
-        num_samples = len(sampled)
-    else:
-        num_samples = min(args.num_samples, len(predictions))
-        sampled = random.sample(predictions, num_samples)
+    # Sample
+    num_samples = min(args.num_samples, len(predictions))
+    sampled = random.sample(predictions, num_samples)
 
-    data_root = Path(args.data_root)
-
-    # Verify data_root exists
-    if not data_root.exists():
-        print(f"ERROR: data_root does not exist: {data_root}")
-        return
+    print(f"Processing {num_samples} samples...")
 
     results = []
-
     for i, pred in enumerate(sampled):
-        print(f"\n[{i+1}/{num_samples}] Processing...")
-
-        # Load original image
-        img_path = extract_relative_path(pred.get("image_path", ""))
-        full_img_path = data_root / img_path
-
-        print(f"  Image: {img_path}")
-        if args.debug:
-            print(f"  Full path: {full_img_path}")
-
-        if not full_img_path.exists():
-            print(f"  ERROR: Image not found!")
-            continue
-
-        img = cv2.imread(str(full_img_path))
-        if img is None:
-            print(f"  ERROR: Failed to read image!")
-            continue
-
-        h, w = img.shape[:2]
-        print(f"  Size: {w}x{h}")
-
-        # Draw bbox on image
-        img_with_bbox = img.copy()
-        defect_loc = pred.get("defect_location", {})
-        bboxes = defect_loc.get("bboxes", []) if defect_loc else []
-
-        # Draw all bboxes (secondary ones in different color)
-        for i, bb in enumerate(bboxes):
-            x_min, y_min, x_max, y_max = bb
-            x_min, y_min = max(0, x_min), max(0, y_min)
-            x_max, y_max = min(w, x_max), min(h, y_max)
-            # Primary bbox in red, secondary in orange
-            color = (0, 0, 255) if i == 0 else (0, 165, 255)
-            thickness = 3 if i == 0 else 2
-            cv2.rectangle(img_with_bbox, (x_min, y_min), (x_max, y_max), color, thickness)
-
-        if bboxes:
-            print(f"  BBoxes: {len(bboxes)} detected")
-
-        # Draw center of primary bbox
-        center = defect_loc.get("center") if defect_loc else None
-        if center:
-            # Check if center is pixel coords or normalized
-            cx, cy = center
-            if isinstance(cx, float) and cx <= 1:
-                cx, cy = int(cx * w), int(cy * h)
-            else:
-                cx, cy = int(cx), int(cy)
-            cv2.circle(img_with_bbox, (cx, cy), 8, (0, 255, 255), -1)
-
-        # Add score/label text
-        score = pred.get("anomaly_score", pred.get("pred_score", 0))
-        pred_label = pred.get("pred_label", pred.get("is_anomaly", 0))
-        is_anomaly = pred_label == 1 or pred_label is True
-        label = "ANOMALY" if is_anomaly else "NORMAL"
-        color = (0, 0, 255) if is_anomaly else (0, 255, 0)
-
-        cv2.putText(img_with_bbox, f"{label} ({score:.2f})", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-
-        if bboxes:
-            region = defect_loc.get("region", "")
-            num_defects = defect_loc.get("num_defects", len(bboxes))
-            cv2.putText(img_with_bbox, f"region: {region} ({num_defects} defects)", (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        else:
-            cv2.putText(img_with_bbox, "no defect", (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
-
-        # Find GT mask
-        mask_path = infer_mask_path(pred.get("image_path", ""), data_root, debug=args.debug)
-
-        mask_vis = None
-        if mask_path and mask_path.exists():
-            print(f"  Mask: FOUND - {mask_path.name}")
-            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-            if mask is not None:
-                mask = cv2.resize(mask, (w, h))
-                mask_color = np.zeros_like(img)
-                mask_color[:, :, 2] = mask
-                mask_vis = cv2.addWeighted(img, 0.7, mask_color, 0.3, 0)
-                cv2.putText(mask_vis, "GT MASK", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-        else:
-            print(f"  Mask: NOT FOUND")
-
-        if mask_vis is None:
-            if "/good/" in img_path:
-                mask_vis = img.copy()
-                cv2.putText(mask_vis, "NORMAL (no defect)", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            else:
-                mask_vis = np.zeros_like(img)
-                cv2.putText(mask_vis, "MASK NOT FOUND", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 128), 2)
-
-        # Combine
-        combined = np.hstack([img_with_bbox, mask_vis])
-
-        # Path info
-        info_bar = np.zeros((40, combined.shape[1], 3), dtype=np.uint8)
-        short_path = "/".join(Path(img_path).parts[-3:])
-        cv2.putText(info_bar, short_path, (10, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        combined = np.vstack([combined, info_bar])
-
-        results.append(combined)
+        vis = visualize_single(pred, data_root)
+        if vis is not None:
+            results.append(vis)
+            img_path = extract_relative_path(pred.get("image_path", ""))
+            short = "/".join(Path(img_path).parts[-3:])
+            print(f"  [{i+1}/{num_samples}] {short}")
 
     if not results:
-        print("\nNo images processed!")
+        print("No images processed!")
         return
 
     # Resize and stack

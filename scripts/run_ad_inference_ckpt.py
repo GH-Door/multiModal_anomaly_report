@@ -101,8 +101,7 @@ def compute_confidence_level(anomaly_score: float, category: str) -> Dict[str, A
 def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> Dict[str, Any]:
     """Compute defect location information from anomaly map.
 
-    Uses contour-based detection to find individual defect regions,
-    returning the primary defect bbox and optionally multiple bboxes.
+    Uses contour-based detection to find the primary (highest score) defect region.
     """
     import cv2 as cv
 
@@ -115,7 +114,6 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
             "has_defect": False,
             "region": "none",
             "bbox": None,
-            "bboxes": [],
             "center": None,
             "area_ratio": 0.0,
         }
@@ -141,7 +139,6 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
             "has_defect": False,
             "region": "none",
             "bbox": None,
-            "bboxes": [],
             "center": None,
             "area_ratio": 0.0,
         }
@@ -173,7 +170,6 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
             "has_defect": False,
             "region": "none",
             "bbox": None,
-            "bboxes": [],
             "center": None,
             "area_ratio": 0.0,
         }
@@ -202,14 +198,10 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
     total_area = sum(c["area"] for c in contour_info)
     area_ratio = total_area / (h * w)
 
-    # Return all bboxes (up to 5) for multiple defects
-    all_bboxes = [c["bbox"] for c in contour_info[:5]]
-
     return {
         "has_defect": True,
         "region": region,
-        "bbox": primary["bbox"],  # Primary (highest score) defect
-        "bboxes": all_bboxes,     # All detected defects
+        "bbox": primary["bbox"],  # Primary (highest score) defect only
         "center": primary["center"],
         "area_ratio": round(area_ratio, 4),
         "confidence": round(primary["score"], 4),
@@ -562,7 +554,6 @@ def main():
                             "has_defect": False,
                             "region": "none",
                             "bbox": None,
-                            "bboxes": [],
                             "center": None,
                             "area_ratio": 0.0,
                         }
