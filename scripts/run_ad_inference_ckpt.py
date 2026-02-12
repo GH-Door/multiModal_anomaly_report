@@ -99,7 +99,7 @@ def compute_confidence_level(anomaly_score: float, category: str) -> Dict[str, A
 def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> Dict[str, Any]:
     """Compute defect location information from anomaly map.
 
-    Uses contour-based detection to find the primary (highest score) defect region.
+    Fast version: finds largest contour above threshold.
     """
     import cv2 as cv
 
@@ -120,16 +120,14 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
     normalized = ((anomaly_map - map_min) / (map_max - map_min) * 255).astype(np.uint8)
 
     # Adaptive threshold: top 30% of values
-    adaptive_threshold = int(255 * 0.7)
-    _, binary = cv.threshold(normalized, adaptive_threshold, 255, cv.THRESH_BINARY)
+    _, binary = cv.threshold(normalized, int(255 * 0.7), 255, cv.THRESH_BINARY)
 
     # Find contours
     contours, _ = cv.findContours(binary, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
 
     if not contours:
         # Fallback with lower threshold
-        adaptive_threshold = int(255 * 0.5)
-        _, binary = cv.threshold(normalized, adaptive_threshold, 255, cv.THRESH_BINARY)
+        _, binary = cv.threshold(normalized, int(255 * 0.5), 255, cv.THRESH_BINARY)
         contours, _ = cv.findContours(binary, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
 
     if not contours:
@@ -141,29 +139,11 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
             "area_ratio": 0.0,
         }
 
-    # Calculate score for each contour (mean anomaly value in region)
-    contour_info = []
-    for contour in contours:
-        if cv.contourArea(contour) < 10:  # Skip tiny contours
-            continue
+    # Find largest contour (fast - no mask creation)
+    largest = max(contours, key=cv.contourArea)
+    area = cv.contourArea(largest)
 
-        x, y, bw, bh = cv.boundingRect(contour)
-
-        # Create mask for this contour
-        mask = np.zeros((h, w), dtype=np.uint8)
-        cv.drawContours(mask, [contour], -1, 255, -1)
-
-        # Calculate mean anomaly score in this region
-        region_score = anomaly_map[mask > 0].mean()
-
-        contour_info.append({
-            "bbox": [int(x), int(y), int(x + bw), int(y + bh)],
-            "score": float(region_score),
-            "area": int(cv.contourArea(contour)),
-            "center": [int(x + bw/2), int(y + bh/2)],  # 픽셀 좌표
-        })
-
-    if not contour_info:
+    if area < 10:
         return {
             "has_defect": False,
             "region": "none",
@@ -172,38 +152,26 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
             "area_ratio": 0.0,
         }
 
-    # Sort by score (highest first)
-    contour_info.sort(key=lambda x: x["score"], reverse=True)
+    x, y, bw, bh = cv.boundingRect(largest)
+    center_x = int(x + bw / 2)
+    center_y = int(y + bh / 2)
 
-    # Primary defect: highest score
-    primary = contour_info[0]
-    x_min, y_min, x_max, y_max = primary["bbox"]
-    center_x, center_y = primary["center"]
+    # Region calculation
+    norm_cx, norm_cy = center_x / w, center_y / h
+    region_y = "top" if norm_cy < 1/3 else ("bottom" if norm_cy > 2/3 else "middle")
+    region_x = "left" if norm_cx < 1/3 else ("right" if norm_cx > 2/3 else "center")
+    region = "center" if (region_y == "middle" and region_x == "center") else f"{region_y}-{region_x}"
 
-    # Region calculation (normalized)
-    norm_center_x = center_x / w
-    norm_center_y = center_y / h
-
-    region_y = "top" if norm_center_y < 1/3 else ("bottom" if norm_center_y > 2/3 else "middle")
-    region_x = "left" if norm_center_x < 1/3 else ("right" if norm_center_x > 2/3 else "center")
-
-    if region_y == "middle" and region_x == "center":
-        region = "center"
-    else:
-        region = f"{region_y}-{region_x}"
-
-    # Total defect area
-    total_area = sum(c["area"] for c in contour_info)
-    area_ratio = total_area / (h * w)
+    # Confidence: max value in bbox region (fast)
+    confidence = float(anomaly_map[y:y+bh, x:x+bw].max())
 
     return {
         "has_defect": True,
         "region": region,
-        "bbox": primary["bbox"],  # Primary (highest score) defect only
-        "center": primary["center"],
-        "area_ratio": round(area_ratio, 4),
-        "confidence": round(primary["score"], 4),
-        "num_defects": len(contour_info),
+        "bbox": [int(x), int(y), int(x + bw), int(y + bh)],
+        "center": [center_x, center_y],
+        "area_ratio": round(area / (h * w), 4),
+        "confidence": round(confidence, 4),
     }
 
 
