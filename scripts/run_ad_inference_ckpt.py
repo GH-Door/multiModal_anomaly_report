@@ -99,10 +99,26 @@ def compute_confidence_level(anomaly_score: float, category: str) -> Dict[str, A
 
 
 def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> Dict[str, Any]:
-    """Compute defect location information from anomaly map."""
-    h, w = anomaly_map.shape
+    """Compute defect location information from anomaly map.
 
-    defect_mask = anomaly_map > threshold
+    Uses adaptive thresholding based on the anomaly map's max value,
+    and finds the largest connected component for more accurate bbox.
+    """
+    from scipy import ndimage
+
+    h, w = anomaly_map.shape
+    map_max = anomaly_map.max()
+    map_min = anomaly_map.min()
+
+    # Adaptive threshold: use higher of (0.5, 70% of max value)
+    # This prevents bbox from being too large when map has high values everywhere
+    adaptive_threshold = max(threshold, map_max * 0.7)
+
+    defect_mask = anomaly_map > adaptive_threshold
+
+    if not defect_mask.any():
+        # Fallback: try with lower threshold if nothing found
+        defect_mask = anomaly_map > (map_max * 0.5)
 
     if not defect_mask.any():
         return {
@@ -112,6 +128,21 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
             "center": None,
             "area_ratio": 0.0,
         }
+
+    # Find connected components and select the one with highest mean score
+    labeled, num_features = ndimage.label(defect_mask)
+
+    if num_features > 1:
+        # Multiple components - select the one with highest anomaly score
+        best_label = 1
+        best_score = 0
+        for i in range(1, num_features + 1):
+            component_mask = labeled == i
+            component_score = anomaly_map[component_mask].mean()
+            if component_score > best_score:
+                best_score = component_score
+                best_label = i
+        defect_mask = labeled == best_label
 
     coords = np.where(defect_mask)
     y_min, y_max = coords[0].min(), coords[0].max()
