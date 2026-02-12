@@ -148,6 +148,7 @@ def main():
     # Sample (skip if specific images provided)
     if args.images:
         sampled = predictions
+        num_samples = len(sampled)
     else:
         num_samples = min(args.num_samples, len(predictions))
         sampled = random.sample(predictions, num_samples)
@@ -188,7 +189,6 @@ def main():
         img_with_bbox = img.copy()
         defect_loc = pred.get("defect_location", {})
         bboxes = defect_loc.get("bboxes", []) if defect_loc else []
-        bbox = defect_loc.get("bbox") if defect_loc else None
 
         # Draw all bboxes (secondary ones in different color)
         for i, bb in enumerate(bboxes):
