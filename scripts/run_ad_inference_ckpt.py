@@ -39,12 +39,63 @@ from src.utils.loaders import load_config
 from src.utils.device import get_device
 
 
+# MVTec-LOCO classes with logical anomalies - PatchCore has limited reliability
+LOW_RELIABILITY_CLASSES = {
+    "screw_bag",      # ~10% normal accuracy
+    "pushpins",       # ~46% normal accuracy
+    "breakfast_box",  # logical anomalies
+    "juice_bottle",   # logical anomalies
+}
+
+
 def parse_image_path(image_path: str) -> Tuple[str, str]:
     """Parse dataset and class name from image path."""
     parts = image_path.split("/")
     if len(parts) >= 2:
         return parts[0], parts[1]
     return "", ""
+
+
+def compute_confidence_level(anomaly_score: float, category: str) -> Dict[str, Any]:
+    """Compute confidence level for LLM decision making.
+
+    Returns:
+        dict with:
+            - level: "high" | "medium" | "low"
+            - reliability: "high" | "low" (based on class characteristics)
+            - reason: explanation for LLM
+    """
+    # Check if this is a known problematic class
+    is_low_reliability = category in LOW_RELIABILITY_CLASSES
+
+    # Determine confidence level based on score distance from decision boundary
+    if anomaly_score > 0.8:
+        level = "high"
+        reason = "Strong anomaly signal (score > 0.8)"
+    elif anomaly_score < 0.2:
+        level = "high"
+        reason = "Strong normal signal (score < 0.2)"
+    elif anomaly_score > 0.6 or anomaly_score < 0.4:
+        level = "medium"
+        reason = "Moderate confidence (score between 0.4-0.6 boundary)"
+    else:
+        level = "low"
+        reason = "Score near decision boundary (0.4-0.6)"
+
+    # Override to low if class has known issues
+    if is_low_reliability:
+        reliability = "low"
+        reliability_reason = f"Class '{category}' contains logical anomalies that PatchCore cannot reliably detect"
+    else:
+        reliability = "high"
+        reliability_reason = "Structural anomaly class - PatchCore reliable"
+
+    return {
+        "level": level,
+        "reliability": reliability,
+        "reason": reason,
+        "reliability_reason": reliability_reason,
+    }
 
 
 def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> Dict[str, Any]:
@@ -415,11 +466,15 @@ def main():
                 infer_time = time.perf_counter() - t0
                 total_inference_time += infer_time
 
+                anomaly_score = round(float(result["anomaly_score"]), 4)
+                confidence_info = compute_confidence_level(anomaly_score, category)
+
                 result_dict = {
                     "image_path": image_path,
-                    "anomaly_score": round(float(result["anomaly_score"]), 4),
+                    "anomaly_score": anomaly_score,
                     "is_anomaly": result["is_anomaly"],
                     "threshold": result["threshold"],
+                    "confidence": confidence_info,
                 }
 
                 if result["anomaly_map"] is not None:
