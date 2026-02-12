@@ -20,6 +20,12 @@ import sys
 import time
 from pathlib import Path
 
+# 프로젝트 루트를 sys.path에 추가 (어디서 실행해도 src 모듈 import 가능)
+SCRIPT_PATH = Path(__file__).resolve()
+PROJ_ROOT = SCRIPT_PATH.parents[1]
+if str(PROJ_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJ_ROOT))
+
 import torch
 from anomalib.models import Patchcore, WinClip, EfficientAd
 from anomalib.models.image.efficient_ad.torch_model import EfficientAdModelSize
