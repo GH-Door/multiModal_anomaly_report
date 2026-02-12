@@ -20,9 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Disable HuggingFace online checks (prevents slow downloads)
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+# Note: HF_HUB_OFFLINE removed - backbone needs internet on first run
 
 import cv2
 import numpy as np
