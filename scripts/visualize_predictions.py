@@ -103,6 +103,7 @@ def main():
     parser.add_argument("--num-samples", type=int, default=12)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--only-anomaly", action="store_true", help="Only sample anomalies")
+    parser.add_argument("--images", type=str, nargs="+", default=None, help="Specific image filenames to visualize")
     parser.add_argument("--debug", action="store_true", help="Print debug info")
 
     args = parser.parse_args()
@@ -120,6 +121,18 @@ def main():
         print(f"Fields: {list(predictions[0].keys())}")
         print(f"Sample image_path: {predictions[0].get('image_path', 'N/A')[:100]}")
 
+    # Filter by specific images if provided
+    if args.images:
+        filtered = []
+        for p in predictions:
+            img_path = p.get("image_path", "")
+            for img_name in args.images:
+                if img_name in img_path:
+                    filtered.append(p)
+                    break
+        predictions = filtered
+        print(f"Filtered to {len(predictions)} matching images: {args.images}")
+
     # Filter anomalies if requested
     if args.only_anomaly:
         predictions = [
@@ -132,9 +145,12 @@ def main():
         print("No predictions to visualize")
         return
 
-    # Sample
-    num_samples = min(args.num_samples, len(predictions))
-    sampled = random.sample(predictions, num_samples)
+    # Sample (skip if specific images provided)
+    if args.images:
+        sampled = predictions
+    else:
+        num_samples = min(args.num_samples, len(predictions))
+        sampled = random.sample(predictions, num_samples)
 
     data_root = Path(args.data_root)
 
@@ -171,19 +187,32 @@ def main():
         # Draw bbox on image
         img_with_bbox = img.copy()
         defect_loc = pred.get("defect_location", {})
+        bboxes = defect_loc.get("bboxes", []) if defect_loc else []
         bbox = defect_loc.get("bbox") if defect_loc else None
 
-        if bbox:
-            x_min, y_min, x_max, y_max = bbox
+        # Draw all bboxes (secondary ones in different color)
+        for i, bb in enumerate(bboxes):
+            x_min, y_min, x_max, y_max = bb
             x_min, y_min = max(0, x_min), max(0, y_min)
             x_max, y_max = min(w, x_max), min(h, y_max)
-            cv2.rectangle(img_with_bbox, (x_min, y_min), (x_max, y_max), (0, 0, 255), 3)
-            print(f"  BBox: [{x_min}, {y_min}, {x_max}, {y_max}]")
+            # Primary bbox in red, secondary in orange
+            color = (0, 0, 255) if i == 0 else (0, 165, 255)
+            thickness = 3 if i == 0 else 2
+            cv2.rectangle(img_with_bbox, (x_min, y_min), (x_max, y_max), color, thickness)
 
-            center = defect_loc.get("center")
-            if center:
-                cx, cy = int(center[0] * w), int(center[1] * h)
-                cv2.circle(img_with_bbox, (cx, cy), 8, (0, 255, 255), -1)
+        if bboxes:
+            print(f"  BBoxes: {len(bboxes)} detected")
+
+        # Draw center of primary bbox
+        center = defect_loc.get("center") if defect_loc else None
+        if center:
+            # Check if center is pixel coords or normalized
+            cx, cy = center
+            if isinstance(cx, float) and cx <= 1:
+                cx, cy = int(cx * w), int(cy * h)
+            else:
+                cx, cy = int(cx), int(cy)
+            cv2.circle(img_with_bbox, (cx, cy), 8, (0, 255, 255), -1)
 
         # Add score/label text
         score = pred.get("anomaly_score", pred.get("pred_score", 0))
@@ -195,12 +224,13 @@ def main():
         cv2.putText(img_with_bbox, f"{label} ({score:.2f})", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-        if bbox:
+        if bboxes:
             region = defect_loc.get("region", "")
-            cv2.putText(img_with_bbox, f"region: {region}", (10, 60),
+            num_defects = defect_loc.get("num_defects", len(bboxes))
+            cv2.putText(img_with_bbox, f"region: {region} ({num_defects} defects)", (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         else:
-            cv2.putText(img_with_bbox, "no bbox", (10, 60),
+            cv2.putText(img_with_bbox, "no defect", (10, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
 
         # Find GT mask

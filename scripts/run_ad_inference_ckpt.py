@@ -165,7 +165,7 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
             "bbox": [int(x), int(y), int(x + bw), int(y + bh)],
             "score": float(region_score),
             "area": int(cv.contourArea(contour)),
-            "center": [round((x + bw/2) / w, 3), round((y + bh/2) / h, 3)],
+            "center": [int(x + bw/2), int(y + bh/2)],  # 픽셀 좌표
         })
 
     if not contour_info:
@@ -184,11 +184,14 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> 
     # Primary defect: highest score
     primary = contour_info[0]
     x_min, y_min, x_max, y_max = primary["bbox"]
-
     center_x, center_y = primary["center"]
 
-    region_y = "top" if center_y < 1/3 else ("bottom" if center_y > 2/3 else "middle")
-    region_x = "left" if center_x < 1/3 else ("right" if center_x > 2/3 else "center")
+    # Region calculation (normalized)
+    norm_center_x = center_x / w
+    norm_center_y = center_y / h
+
+    region_y = "top" if norm_center_y < 1/3 else ("bottom" if norm_center_y > 2/3 else "middle")
+    region_x = "left" if norm_center_x < 1/3 else ("right" if norm_center_x > 2/3 else "center")
 
     if region_y == "middle" and region_x == "center":
         region = "center"
@@ -551,7 +554,18 @@ def main():
                 }
 
                 if result["anomaly_map"] is not None:
-                    location_info = compute_defect_location(result["anomaly_map"], result["threshold"])
+                    # Only compute defect location if is_anomaly is True
+                    if result["is_anomaly"]:
+                        location_info = compute_defect_location(result["anomaly_map"], result["threshold"])
+                    else:
+                        location_info = {
+                            "has_defect": False,
+                            "region": "none",
+                            "bbox": None,
+                            "bboxes": [],
+                            "center": None,
+                            "area_ratio": 0.0,
+                        }
                     result_dict["defect_location"] = location_info
                     result_dict["map_stats"] = {
                         "max": round(float(result["anomaly_map"].max()), 4),
