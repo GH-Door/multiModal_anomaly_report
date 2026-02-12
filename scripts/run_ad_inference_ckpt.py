@@ -99,80 +99,47 @@ def compute_confidence_level(anomaly_score: float, category: str) -> Dict[str, A
 
 
 def compute_defect_location(anomaly_map: np.ndarray, threshold: float = 0.5) -> Dict[str, Any]:
-    """Compute defect location information from anomaly map.
-
-    Fast version: finds largest contour above threshold.
-    """
-
+    """Compute defect location - contour based, largest region only."""
     h, w = anomaly_map.shape
-    map_max = anomaly_map.max()
-    map_min = anomaly_map.min()
+    map_max, map_min = anomaly_map.max(), anomaly_map.min()
 
     if map_max == map_min:
-        return {
-            "has_defect": False,
-            "region": "none",
-            "bbox": None,
-            "center": None,
-            "area_ratio": 0.0,
-        }
+        return {"has_defect": False, "region": "none", "bbox": None, "center": None, "area_ratio": 0.0}
 
-    # Normalize to 0-255 for cv2 processing
+    # Normalize and threshold
     normalized = ((anomaly_map - map_min) / (map_max - map_min) * 255).astype(np.uint8)
-
-    # Adaptive threshold: top 30% of values
     _, binary = cv2.threshold(normalized, int(255 * 0.7), 255, cv2.THRESH_BINARY)
-
-    # Find contours
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
-        # Fallback with lower threshold
         _, binary = cv2.threshold(normalized, int(255 * 0.5), 255, cv2.THRESH_BINARY)
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
-        return {
-            "has_defect": False,
-            "region": "none",
-            "bbox": None,
-            "center": None,
-            "area_ratio": 0.0,
-        }
+        return {"has_defect": False, "region": "none", "bbox": None, "center": None, "area_ratio": 0.0}
 
-    # Find largest contour (fast - no mask creation)
+    # Largest contour
     largest = max(contours, key=cv2.contourArea)
     area = cv2.contourArea(largest)
-
     if area < 10:
-        return {
-            "has_defect": False,
-            "region": "none",
-            "bbox": None,
-            "center": None,
-            "area_ratio": 0.0,
-        }
+        return {"has_defect": False, "region": "none", "bbox": None, "center": None, "area_ratio": 0.0}
 
     x, y, bw, bh = cv2.boundingRect(largest)
-    center_x = int(x + bw / 2)
-    center_y = int(y + bh / 2)
+    cx, cy = x + bw // 2, y + bh // 2
 
-    # Region calculation
-    norm_cx, norm_cy = center_x / w, center_y / h
+    # Region
+    norm_cx, norm_cy = cx / w, cy / h
     region_y = "top" if norm_cy < 1/3 else ("bottom" if norm_cy > 2/3 else "middle")
     region_x = "left" if norm_cx < 1/3 else ("right" if norm_cx > 2/3 else "center")
     region = "center" if (region_y == "middle" and region_x == "center") else f"{region_y}-{region_x}"
 
-    # Confidence: max value in bbox region (fast)
-    confidence = float(anomaly_map[y:y+bh, x:x+bw].max())
-
     return {
         "has_defect": True,
         "region": region,
-        "bbox": [int(x), int(y), int(x + bw), int(y + bh)],
-        "center": [center_x, center_y],
+        "bbox": [x, y, x + bw, y + bh],
+        "center": [cx, cy],
         "area_ratio": round(area / (h * w), 4),
-        "confidence": round(confidence, 4),
+        "confidence": round(float(anomaly_map[y:y+bh, x:x+bw].max()), 4),
     }
 
 
