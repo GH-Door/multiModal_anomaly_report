@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
@@ -20,7 +21,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Disable HuggingFace online checks after first download
+# Set HuggingFace cache to use local files only
+# Reference: https://github.com/huggingface/pytorch-image-models/discussions/1826
+# Since timm 0.9.x uses HuggingFace Hub by default, we need proper offline handling
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
@@ -29,6 +32,10 @@ import numpy as np
 import torch
 from torch.nn.functional import interpolate
 from tqdm import tqdm
+
+# Enable cuDNN benchmark for optimized kernel selection
+# Reference: https://discuss.pytorch.org/t/inference-on-gpu-slows-after-a-few-iterations/84605
+torch.backends.cudnn.benchmark = True
 
 SCRIPT_PATH = Path(__file__).resolve()
 PROJ_ROOT = SCRIPT_PATH.parents[1]
@@ -203,7 +210,22 @@ class PatchCoreCheckpointManager:
             if ckpt_path is None:
                 raise FileNotFoundError(f"Checkpoint not found for {key}")
 
-            model = Patchcore.load_from_checkpoint(str(ckpt_path), map_location="cpu", weights_only=False)
+            try:
+                model = Patchcore.load_from_checkpoint(str(ckpt_path), map_location="cpu", weights_only=False)
+            except Exception as e:
+                # If offline mode fails, try with online mode as fallback
+                # Reference: https://github.com/huggingface/diffusers/issues/1717
+                if "HF_HUB_OFFLINE" in str(e) or "locate the file on the Hub" in str(e):
+                    print(f"  Warning: Offline mode failed, retrying with network access...")
+                    os.environ.pop("HF_HUB_OFFLINE", None)
+                    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+                    model = Patchcore.load_from_checkpoint(str(ckpt_path), map_location="cpu", weights_only=False)
+                    # Re-enable offline mode for subsequent loads
+                    os.environ["HF_HUB_OFFLINE"] = "1"
+                    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+                else:
+                    raise
+
             model.eval()
             model.to(self.device)
             self._models[key] = model
@@ -250,9 +272,13 @@ class PatchCoreCheckpointManager:
         input_tensor = self._preprocess(image)
         original_size = image.shape[:2]
 
-        # Inference
+        # Inference with proper GPU synchronization
+        # Reference: https://discuss.pytorch.org/t/inference-on-gpu-slows-after-a-few-iterations/84605
         with torch.no_grad():
             outputs = model(input_tensor)
+            # Synchronize to ensure GPU operations complete before proceeding
+            if self.device.type == "cuda":
+                torch.cuda.synchronize()
 
         # Extract results
         anomaly_map = getattr(outputs, "anomaly_map", None)
@@ -273,6 +299,13 @@ class PatchCoreCheckpointManager:
         anomaly_score = float(pred_score[0].cpu()) if pred_score is not None else float(anomaly_map.max())
         # pred_label: anomalib이 학습 시 F1 최적화로 계산한 threshold 적용 결과
         is_anomaly = bool(pred_label[0].cpu()) if pred_label is not None else (anomaly_score > self.threshold)
+
+        # Explicitly delete intermediate tensors to prevent memory accumulation
+        del input_tensor, outputs
+        if pred_score is not None:
+            del pred_score
+        if pred_label is not None:
+            del pred_label
 
         return {
             "anomaly_score": anomaly_score,
@@ -308,9 +341,12 @@ class PatchCoreCheckpointManager:
         return sorted(available)
 
     def clear_cache(self):
-        """Clear loaded models."""
+        """Clear loaded models and free GPU memory."""
         self._models.clear()
         self._warmup_done.clear()
+        # Run garbage collection before clearing CUDA cache
+        # This helps ensure Python objects are freed before CUDA memory
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -501,9 +537,12 @@ def main():
                 results.append(result_dict)
                 processed += 1
 
-                # Clear GPU cache periodically to prevent slowdown
-                if processed % 100 == 0 and torch.cuda.is_available():
+                # Clear GPU cache and run garbage collection periodically
+                # Reference: https://github.com/openvinotoolkit/anomalib/issues/559
+                # More frequent clearing (every 50 images) helps prevent memory fragmentation
+                if processed % 50 == 0 and torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                    gc.collect()
 
             except Exception as e:
                 errors += 1
