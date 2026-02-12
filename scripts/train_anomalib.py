@@ -638,6 +638,7 @@ class Anomalibs:
         # Collect predictions
         y_true = []
         y_score = []
+        y_pred = []
         gt_masks = []
         anomaly_maps = []
 
@@ -645,6 +646,11 @@ class Anomalibs:
             if batch.gt_label is not None and batch.pred_score is not None:
                 y_true.extend(batch.gt_label.numpy().tolist())
                 y_score.extend(batch.pred_score.numpy().tolist())
+                # pred_label: anomalib이 학습 시 최적화한 threshold 적용 결과
+                if batch.pred_label is not None:
+                    y_pred.extend(batch.pred_label.numpy().tolist())
+                else:
+                    y_pred.extend((batch.pred_score.numpy() > 0.5).astype(int).tolist())
             if batch.gt_mask is not None and batch.anomaly_map is not None:
                 gt_masks.append(batch.gt_mask.numpy())
                 anomaly_maps.append(batch.anomaly_map.numpy())
@@ -655,7 +661,7 @@ class Anomalibs:
 
         y_true = np.array(y_true)
         y_score = np.array(y_score)
-        y_pred = (y_score > 0.5).astype(int)
+        y_pred = np.array(y_pred)
 
         # Compute image-level metrics
         auroc = roc_auc_score(y_true, y_score)
