@@ -1,14 +1,12 @@
 #!/usr/bin/env python
-"""Visualize AD inference predictions on original images.
-
-Randomly samples predictions and draws bbox, center, region, score etc.
+"""Visualize AD predictions: compare bbox with GT mask.
 
 Usage:
     python scripts/visualize_predictions.py \
-        --predictions output/ad_predictions.json \
+        --predictions predictions.json \
         --data-root /path/to/MMAD \
-        --output output/visualizations \
-        --num-samples 20
+        --output output/vis_compare.png \
+        --num-samples 12
 """
 from __future__ import annotations
 
@@ -21,280 +19,154 @@ import cv2
 import numpy as np
 
 
-def draw_prediction(
-    image: np.ndarray,
-    pred: dict,
-    show_bbox: bool = True,
-    show_center: bool = True,
-    show_info: bool = True,
-) -> np.ndarray:
-    """Draw prediction info on image.
-
-    Args:
-        image: BGR image
-        pred: Prediction dict with anomaly_score, is_anomaly, defect_location, etc.
-        show_bbox: Draw bounding box
-        show_center: Draw center point
-        show_info: Draw text info
-
-    Returns:
-        Annotated image
-    """
-    img = image.copy()
-    h, w = img.shape[:2]
-
-    # Colors
-    COLOR_NORMAL = (0, 255, 0)      # Green
-    COLOR_ANOMALY = (0, 0, 255)     # Red
-    COLOR_BBOX = (255, 0, 255)      # Magenta
-    COLOR_CENTER = (255, 255, 0)    # Cyan
-    COLOR_TEXT_BG = (0, 0, 0)       # Black
-
-    # Determine if anomaly
-    is_anomaly = pred.get("is_anomaly", False)
-    anomaly_score = pred.get("anomaly_score", pred.get("pred_score", 0))
-    pred_label = pred.get("pred_label")
-
-    # If pred_label exists, use it
-    if pred_label is not None:
-        is_anomaly = bool(pred_label)
-
-    main_color = COLOR_ANOMALY if is_anomaly else COLOR_NORMAL
-
-    # Draw defect location if exists
-    defect_loc = pred.get("defect_location", {})
-
-    if defect_loc.get("has_defect") and show_bbox:
-        bbox = defect_loc.get("bbox")
-        if bbox:
-            x_min, y_min, x_max, y_max = bbox
-            cv2.rectangle(img, (x_min, y_min), (x_max, y_max), COLOR_BBOX, 2)
-
-    if defect_loc.get("center") and show_center:
-        center = defect_loc.get("center")
-        # center is normalized [0-1]
-        cx = int(center[0] * w)
-        cy = int(center[1] * h)
-        cv2.circle(img, (cx, cy), 8, COLOR_CENTER, -1)
-        cv2.circle(img, (cx, cy), 10, COLOR_CENTER, 2)
-
-    # Draw info text
-    if show_info:
-        # Status bar at top
-        status = "ANOMALY" if is_anomaly else "NORMAL"
-        score_text = f"{status} (score: {anomaly_score:.3f})"
-
-        # Background for text
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.7
-        thickness = 2
-        (text_w, text_h), baseline = cv2.getTextSize(score_text, font, font_scale, thickness)
-
-        cv2.rectangle(img, (0, 0), (text_w + 20, text_h + 20), COLOR_TEXT_BG, -1)
-        cv2.putText(img, score_text, (10, text_h + 10), font, font_scale, main_color, thickness)
-
-        # Additional info
-        y_offset = text_h + 40
-        info_lines = []
-
-        # Region
-        if defect_loc.get("region"):
-            info_lines.append(f"Region: {defect_loc['region']}")
-
-        # Area ratio
-        if defect_loc.get("area_ratio"):
-            info_lines.append(f"Area: {defect_loc['area_ratio']*100:.1f}%")
-
-        # Confidence (from defect_location)
-        if defect_loc.get("confidence"):
-            info_lines.append(f"Conf: {defect_loc['confidence']:.3f}")
-
-        # Confidence level (new field)
-        confidence_info = pred.get("confidence", {})
-        if confidence_info:
-            level = confidence_info.get("level", "")
-            reliability = confidence_info.get("reliability", "")
-            if level:
-                info_lines.append(f"Level: {level}")
-            if reliability:
-                info_lines.append(f"Reliability: {reliability}")
-
-        # Map stats
-        map_stats = pred.get("map_stats", {})
-        if map_stats:
-            info_lines.append(f"Map max: {map_stats.get('max', 0):.3f}")
-
-        for line in info_lines:
-            (line_w, line_h), _ = cv2.getTextSize(line, font, 0.5, 1)
-            cv2.rectangle(img, (0, y_offset - line_h - 5), (line_w + 20, y_offset + 5), COLOR_TEXT_BG, -1)
-            cv2.putText(img, line, (10, y_offset), font, 0.5, (255, 255, 255), 1)
-            y_offset += line_h + 15
-
-    # Border based on prediction
-    border_thickness = 5
-    cv2.rectangle(img, (0, 0), (w-1, h-1), main_color, border_thickness)
-
-    return img
+def extract_relative_path(image_path: str) -> str:
+    """Extract relative path from absolute path."""
+    for dataset in ["GoodsAD", "MVTec-AD", "MVTec-LOCO", "VisA"]:
+        if dataset in image_path:
+            idx = image_path.index(dataset)
+            return image_path[idx:]
+    return image_path
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize AD predictions")
-    parser.add_argument("--predictions", type=str, required=True, help="Path to predictions JSON")
-    parser.add_argument("--data-root", type=str, required=True, help="Root directory of images")
-    parser.add_argument("--output", type=str, default="output/visualizations", help="Output directory")
-    parser.add_argument("--num-samples", type=int, default=20, help="Number of random samples")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--filter-anomaly", action="store_true", help="Only show anomalies")
-    parser.add_argument("--filter-normal", action="store_true", help="Only show normals")
-    parser.add_argument("--category", type=str, default=None, help="Filter by category")
-    parser.add_argument("--no-bbox", action="store_true", help="Don't draw bbox")
-    parser.add_argument("--no-center", action="store_true", help="Don't draw center")
-    parser.add_argument("--grid", action="store_true", help="Create grid image instead of individual files")
-    parser.add_argument("--grid-cols", type=int, default=4, help="Grid columns")
-    parser.add_argument("--resize", type=int, default=None, help="Resize images to this size")
+    parser = argparse.ArgumentParser(description="Visualize predictions vs GT mask")
+    parser.add_argument("--predictions", type=str, required=True)
+    parser.add_argument("--data-root", type=str, required=True)
+    parser.add_argument("--output", type=str, default="output/vis_compare.png")
+    parser.add_argument("--num-samples", type=int, default=12)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--only-anomaly", action="store_true", help="Only sample anomalies (with mask)")
 
     args = parser.parse_args()
-
     random.seed(args.seed)
 
     # Load predictions
-    predictions_path = Path(args.predictions)
-    if not predictions_path.exists():
-        print(f"Error: Predictions file not found: {predictions_path}")
-        return
-
-    with open(predictions_path, "r", encoding="utf-8") as f:
+    with open(args.predictions, "r", encoding="utf-8") as f:
         predictions = json.load(f)
 
     print(f"Loaded {len(predictions)} predictions")
 
-    # Filter predictions
-    filtered = predictions
+    # Filter: only those with mask_path (anomalies with GT)
+    if args.only_anomaly:
+        predictions = [p for p in predictions if p.get("mask_path")]
+        print(f"Filtered to {len(predictions)} with GT mask")
 
-    if args.filter_anomaly:
-        filtered = [p for p in filtered if p.get("is_anomaly") or p.get("pred_label") == 1]
-        print(f"Filtered to {len(filtered)} anomalies")
-    elif args.filter_normal:
-        filtered = [p for p in filtered if not p.get("is_anomaly") and p.get("pred_label", 1) == 0]
-        print(f"Filtered to {len(filtered)} normals")
-
-    if args.category:
-        filtered = [p for p in filtered if args.category in p.get("image_path", "")]
-        print(f"Filtered to {len(filtered)} for category '{args.category}'")
-
-    if not filtered:
-        print("No predictions after filtering")
+    if not predictions:
+        print("No predictions to visualize")
         return
 
     # Sample
-    num_samples = min(args.num_samples, len(filtered))
-    sampled = random.sample(filtered, num_samples)
-    print(f"Sampled {num_samples} predictions")
+    num_samples = min(args.num_samples, len(predictions))
+    sampled = random.sample(predictions, num_samples)
 
-    # Data root
     data_root = Path(args.data_root)
+    results = []
 
-    # Output directory
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    for pred in sampled:
+        # Load original image
+        img_path = extract_relative_path(pred.get("image_path", ""))
+        full_img_path = data_root / img_path
 
-    # Process images
-    images = []
-    valid_preds = []
-
-    for i, pred in enumerate(sampled):
-        image_path = pred.get("image_path", "")
-
-        # Handle absolute vs relative paths
-        if image_path.startswith("/"):
-            # Absolute path - try to extract relative part
-            # e.g., /content/drive/.../MMAD/GoodsAD/... -> GoodsAD/...
-            for dataset in ["GoodsAD", "MVTec-AD", "MVTec-LOCO", "VisA"]:
-                if dataset in image_path:
-                    idx = image_path.index(dataset)
-                    image_path = image_path[idx:]
-                    break
-
-        full_path = data_root / image_path
-
-        if not full_path.exists():
-            print(f"  [{i+1}] Image not found: {full_path}")
+        if not full_img_path.exists():
+            print(f"Image not found: {full_img_path}")
             continue
 
-        img = cv2.imread(str(full_path))
+        img = cv2.imread(str(full_img_path))
         if img is None:
-            print(f"  [{i+1}] Failed to read: {full_path}")
             continue
 
-        # Resize if specified
-        if args.resize:
-            img = cv2.resize(img, (args.resize, args.resize))
+        h, w = img.shape[:2]
 
-        # Draw prediction
-        annotated = draw_prediction(
-            img, pred,
-            show_bbox=not args.no_bbox,
-            show_center=not args.no_center,
-        )
+        # Draw bbox on image
+        img_with_bbox = img.copy()
+        defect_loc = pred.get("defect_location", {})
+        bbox = defect_loc.get("bbox")
 
-        images.append(annotated)
-        valid_preds.append(pred)
+        if bbox:
+            x_min, y_min, x_max, y_max = bbox
+            cv2.rectangle(img_with_bbox, (x_min, y_min), (x_max, y_max), (0, 0, 255), 3)
+            # Draw center
+            center = defect_loc.get("center")
+            if center:
+                cx, cy = int(center[0] * w), int(center[1] * h)
+                cv2.circle(img_with_bbox, (cx, cy), 8, (0, 255, 255), -1)
 
-        # Save individual if not grid mode
-        if not args.grid:
-            # Create filename from path
-            path_parts = Path(image_path).parts
-            if len(path_parts) >= 3:
-                filename = f"{path_parts[-4]}_{path_parts[-3]}_{path_parts[-1]}"
+        # Add score text
+        score = pred.get("anomaly_score", pred.get("pred_score", 0))
+        is_anomaly = pred.get("is_anomaly", pred.get("pred_label", 0))
+        label = "ANOMALY" if is_anomaly else "NORMAL"
+        color = (0, 0, 255) if is_anomaly else (0, 255, 0)
+
+        cv2.putText(img_with_bbox, f"{label} ({score:.2f})", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        # Load GT mask
+        mask_path = pred.get("mask_path")
+        if mask_path:
+            mask_path = extract_relative_path(mask_path)
+            full_mask_path = data_root / mask_path
+
+            if full_mask_path.exists():
+                mask = cv2.imread(str(full_mask_path), cv2.IMREAD_GRAYSCALE)
+                if mask is not None:
+                    # Resize mask to match image
+                    mask = cv2.resize(mask, (w, h))
+                    # Convert to color (red overlay)
+                    mask_color = np.zeros_like(img)
+                    mask_color[:, :, 2] = mask  # Red channel
+                    # Blend with original
+                    mask_vis = cv2.addWeighted(img, 0.7, mask_color, 0.3, 0)
+                    cv2.putText(mask_vis, "GT MASK", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                else:
+                    mask_vis = np.zeros_like(img)
+                    cv2.putText(mask_vis, "MASK LOAD FAILED", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
             else:
-                filename = Path(image_path).name
+                mask_vis = np.zeros_like(img)
+                cv2.putText(mask_vis, "NO MASK FILE", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 128), 2)
+        else:
+            # Normal image - no mask
+            mask_vis = np.zeros_like(img)
+            cv2.putText(mask_vis, "NORMAL (no mask)", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-            is_anomaly = pred.get("is_anomaly") or pred.get("pred_label") == 1
-            prefix = "anomaly" if is_anomaly else "normal"
-            output_path = output_dir / f"{prefix}_{i:03d}_{filename}"
+        # Combine: [image + bbox] | [GT mask]
+        combined = np.hstack([img_with_bbox, mask_vis])
 
-            cv2.imwrite(str(output_path), annotated)
-            print(f"  [{i+1}] Saved: {output_path.name}")
+        # Add path info at bottom
+        info_bar = np.zeros((40, combined.shape[1], 3), dtype=np.uint8)
+        short_path = "/".join(Path(img_path).parts[-3:])
+        cv2.putText(info_bar, short_path, (10, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        combined = np.vstack([combined, info_bar])
 
-    print(f"\nProcessed {len(images)} images")
+        results.append(combined)
+        print(f"Processed: {short_path}")
 
-    # Create grid if requested
-    if args.grid and images:
-        cols = args.grid_cols
-        rows = (len(images) + cols - 1) // cols
+    if not results:
+        print("No images processed")
+        return
 
-        # Resize all to same size
-        target_size = args.resize or 300
-        resized = [cv2.resize(img, (target_size, target_size)) for img in images]
+    # Resize all to same width
+    target_width = 800
+    resized = []
+    for r in results:
+        scale = target_width / r.shape[1]
+        new_h = int(r.shape[0] * scale)
+        resized.append(cv2.resize(r, (target_width, new_h)))
 
-        # Pad with black if needed
-        while len(resized) < rows * cols:
-            resized.append(np.zeros((target_size, target_size, 3), dtype=np.uint8))
+    # Stack vertically
+    final = np.vstack(resized)
 
-        # Create grid
-        grid_rows = []
-        for r in range(rows):
-            row_imgs = resized[r * cols : (r + 1) * cols]
-            grid_rows.append(np.hstack(row_imgs))
+    # Save
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), final)
 
-        grid = np.vstack(grid_rows)
-
-        grid_path = output_dir / "grid.png"
-        cv2.imwrite(str(grid_path), grid)
-        print(f"\nGrid saved: {grid_path}")
-
-    # Summary
-    print(f"\n{'='*60}")
-    print("Summary")
-    print(f"{'='*60}")
-
-    anomaly_count = sum(1 for p in valid_preds if p.get("is_anomaly") or p.get("pred_label") == 1)
-    normal_count = len(valid_preds) - anomaly_count
-
-    print(f"Total visualized: {len(valid_preds)}")
-    print(f"  Anomalies: {anomaly_count}")
-    print(f"  Normals: {normal_count}")
-    print(f"Output directory: {output_dir}")
+    print(f"\nSaved: {output_path}")
+    print(f"Image size: {final.shape[1]}x{final.shape[0]}")
 
 
 if __name__ == "__main__":
