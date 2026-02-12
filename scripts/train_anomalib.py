@@ -138,16 +138,20 @@ class Anomalibs:
         self.device = get_device()
         self.accelerator = self.engine_config.get("accelerator", "auto")
         self.loader = MMADLoader(config=self.config, model_name=self.model_name)
-        print(f"[{self.model_name}] device: {self.device}, accelerator: {self.accelerator}")
+        self.image_size = tuple(self.config.get("data", {}).get("image_size", (256, 256)))
+        print(f"[{self.model_name}] device: {self.device}, accelerator: {self.accelerator}, image_size: {self.image_size}")
+        get_train_logger().info(f"[{self.model_name}] device: {self.device}, accelerator: {self.accelerator}, image_size: {self.image_size}")
 
     @staticmethod
     def cleanup_memory():
         """GPU 및 시스템 메모리 캐시 강제 비활성화 및 정리"""
         import gc
-        gc.collect() # Python 가비지 컬렉션
+        gc.collect()
+        gc.collect()  # 순환 참조 해제를 위해 2회 호출
         if torch.cuda.is_available():
-            torch.cuda.empty_cache() # PyTorch CUDA 캐시 비움
-            torch.cuda.ipc_collect() # IPC 메모리 비움
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            torch.cuda.reset_peak_memory_stats()
 
     @staticmethod
     def filter_none(d: dict) -> dict:
@@ -181,14 +185,17 @@ class Anomalibs:
         return Evaluator(val_metrics=val_metrics, test_metrics=test_metrics)
 
     def get_model(self):
-        if self.model_name == "patchcore":
-            return Patchcore(**self.model_params)
-        elif self.model_name == "winclip":
-            return WinClip(**self.model_params)
-        elif self.model_name == "efficientad":
-            return EfficientAd(**self.model_params)
-        else:
+        from anomalib.pre_processing import PreProcessor
+        from torchvision.transforms.v2 import Normalize
+
+        model_class = {"patchcore": Patchcore, "winclip": WinClip, "efficientad": EfficientAd}.get(self.model_name)
+        if model_class is None:
             raise ValueError(f"Unknown model: {self.model_name}")
+
+        # Resize는 DataModule에서 처리, pre_processor는 Normalize만
+        transform = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        pre_processor = PreProcessor(transform=transform)
+        return model_class(pre_processor=pre_processor, **self.model_params)
 
     def get_datamodule_kwargs(self):
         # datamodule kwargs from training config
