@@ -124,16 +124,27 @@ def main():
     # Filter by specific images if provided
     if args.images:
         filtered = []
+        # Debug: show what we're looking for
+        print(f"Looking for images: {args.images}")
+        for img_query in args.images:
+            img_query_rel = extract_relative_path(img_query)
+            print(f"  Query relative: {img_query_rel}")
+
         for p in predictions:
             img_path = p.get("image_path", "")
             rel_path = extract_relative_path(img_path)
             for img_query in args.images:
-                # Support: absolute path, relative path, or partial filename
                 img_query_rel = extract_relative_path(img_query)
-                if (img_query == img_path or           # exact match
-                    img_query_rel == rel_path or       # relative path match
-                    img_query in img_path or           # partial match
-                    img_query_rel in rel_path):        # partial relative match
+                # Support: exact, relative, or partial match
+                matched = (
+                    img_query == img_path or
+                    img_query_rel == rel_path or
+                    img_query in img_path or
+                    img_query_rel in rel_path or
+                    rel_path in img_query or
+                    rel_path in img_query_rel
+                )
+                if matched:
                     filtered.append(p)
                     break
         predictions = filtered
