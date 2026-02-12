@@ -666,8 +666,13 @@ class Anomalibs:
         # Compute PRO (pixel-level)
         pro = None
         if gt_masks and anomaly_maps:
-            gt_masks_np = np.concatenate(gt_masks, axis=0).squeeze(1)  # (N, H, W)
-            anomaly_maps_np = np.concatenate(anomaly_maps, axis=0).squeeze(1)  # (N, H, W)
+            gt_masks_np = np.concatenate(gt_masks, axis=0)
+            anomaly_maps_np = np.concatenate(anomaly_maps, axis=0)
+            # Ensure 3D shape (N, H, W)
+            if gt_masks_np.ndim == 4:
+                gt_masks_np = gt_masks_np.squeeze(1)
+            if anomaly_maps_np.ndim == 4:
+                anomaly_maps_np = anomaly_maps_np.squeeze(1)
             # Only compute PRO for anomaly samples (where gt_mask has defects)
             has_defect = gt_masks_np.sum(axis=(1, 2)) > 0
             if has_defect.sum() > 0:
@@ -875,8 +880,12 @@ class Anomalibs:
                 auroc = roc_auc_score(np.array(y_true), np.array(y_score))
                 pro = None
                 if gt_masks and anomaly_maps:
-                    gt_masks_np = np.concatenate(gt_masks, axis=0).squeeze(1)
-                    anomaly_maps_np = np.concatenate(anomaly_maps, axis=0).squeeze(1)
+                    gt_masks_np = np.concatenate(gt_masks, axis=0)
+                    anomaly_maps_np = np.concatenate(anomaly_maps, axis=0)
+                    if gt_masks_np.ndim == 4:
+                        gt_masks_np = gt_masks_np.squeeze(1)
+                    if anomaly_maps_np.ndim == 4:
+                        anomaly_maps_np = anomaly_maps_np.squeeze(1)
                     has_defect = gt_masks_np.sum(axis=(1, 2)) > 0
                     if has_defect.sum() > 0:
                         pro = compute_pro(gt_masks_np[has_defect], anomaly_maps_np[has_defect], num_thresholds=50)
