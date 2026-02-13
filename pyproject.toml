@@ -58,6 +58,7 @@ dependencies = [
   "deepl>=1.22.0",
   "kiwipiepy>=0.22.2",
   "konlpy>=0.6.0",
+  "sentence-transformers>=5.2.2",
 ]
 
 [tool.hatch.build.targets.wheel]
