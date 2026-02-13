@@ -1,0 +1,53 @@
+{
+  "schema_version": "ad_policy_v1",
+  "default": {
+    "t_low": 0.35,
+    "t_high": 0.65,
+    "reliability": "high",
+    "ad_weight": 0.7,
+    "use_bbox": true,
+    "min_location_confidence": 0.25
+  },
+  "classes": {
+    "GoodsAD/food_box": {
+      "t_low": 0.35,
+      "t_high": 0.95,
+      "reliability": "low",
+      "ad_weight": 0.2,
+      "use_bbox": false,
+      "min_location_confidence": 0.35
+    },
+    "GoodsAD/food_package": {
+      "t_low": 0.38,
+      "t_high": 0.93,
+      "reliability": "low",
+      "ad_weight": 0.2,
+      "use_bbox": false,
+      "min_location_confidence": 0.35
+    },
+    "MVTec-LOCO/pushpins": {
+      "t_low": 0.43,
+      "t_high": 0.67,
+      "reliability": "low",
+      "ad_weight": 0.2,
+      "use_bbox": false,
+      "min_location_confidence": 0.35
+    },
+    "MVTec-LOCO/screw_bag": {
+      "t_low": 0.49,
+      "t_high": 0.72,
+      "reliability": "low",
+      "ad_weight": 0.25,
+      "use_bbox": true,
+      "min_location_confidence": 0.4
+    },
+    "MVTec-LOCO/breakfast_box": {
+      "t_low": 0.42,
+      "t_high": 0.6,
+      "reliability": "medium",
+      "ad_weight": 0.45,
+      "use_bbox": true,
+      "min_location_confidence": 0.3
+    }
+  }
+}
