@@ -29,6 +29,7 @@ import json
 import sys
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -52,6 +53,60 @@ LOW_RELIABILITY_CLASSES = {
     "pushpins",
     "breakfast_box",
     "juice_bottle",
+}
+
+DEFAULT_AD_POLICY: Dict[str, Any] = {
+    "schema_version": "ad_policy_v1",
+    "default": {
+        "t_low": 0.35,
+        "t_high": 0.65,
+        "reliability": "high",
+        "ad_weight": 0.7,
+        "use_bbox": True,
+        "min_location_confidence": 0.25,
+    },
+    "classes": {
+        "GoodsAD/food_box": {
+            "t_low": 0.35,
+            "t_high": 0.95,
+            "reliability": "low",
+            "ad_weight": 0.2,
+            "use_bbox": False,
+            "min_location_confidence": 0.35,
+        },
+        "GoodsAD/food_package": {
+            "t_low": 0.38,
+            "t_high": 0.93,
+            "reliability": "low",
+            "ad_weight": 0.2,
+            "use_bbox": False,
+            "min_location_confidence": 0.35,
+        },
+        "MVTec-LOCO/pushpins": {
+            "t_low": 0.43,
+            "t_high": 0.67,
+            "reliability": "low",
+            "ad_weight": 0.2,
+            "use_bbox": False,
+            "min_location_confidence": 0.35,
+        },
+        "MVTec-LOCO/screw_bag": {
+            "t_low": 0.49,
+            "t_high": 0.72,
+            "reliability": "low",
+            "ad_weight": 0.25,
+            "use_bbox": True,
+            "min_location_confidence": 0.4,
+        },
+        "MVTec-LOCO/breakfast_box": {
+            "t_low": 0.42,
+            "t_high": 0.60,
+            "reliability": "medium",
+            "ad_weight": 0.45,
+            "use_bbox": True,
+            "min_location_confidence": 0.3,
+        },
+    },
 }
 
 
@@ -140,6 +195,217 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float) -> Dict[s
         "center": [round(center_x, 3), round(center_y, 3)],
         "area_ratio": round(area_ratio, 4),
         "confidence": round(confidence, 4),
+    }
+
+
+def _clip01(value: float) -> float:
+    return float(max(0.0, min(1.0, value)))
+
+
+def _deep_copy_json_obj(obj: Dict[str, Any]) -> Dict[str, Any]:
+    return json.loads(json.dumps(obj))
+
+
+def load_ad_policy(policy_path: Optional[Path]) -> Dict[str, Any]:
+    policy = _deep_copy_json_obj(DEFAULT_AD_POLICY)
+    if policy_path is None:
+        return policy
+    if not policy_path.exists():
+        return policy
+
+    try:
+        with open(policy_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+    except Exception:
+        return policy
+
+    if not isinstance(loaded, dict):
+        return policy
+
+    default_loaded = loaded.get("default", {})
+    if isinstance(default_loaded, dict):
+        policy["default"].update(default_loaded)
+
+    classes_loaded = loaded.get("classes", {})
+    if isinstance(classes_loaded, dict):
+        for key, value in classes_loaded.items():
+            if not isinstance(value, dict):
+                continue
+            existing = policy["classes"].get(key, {})
+            merged = dict(existing)
+            merged.update(value)
+            policy["classes"][key] = merged
+
+    if isinstance(loaded.get("schema_version"), str):
+        policy["schema_version"] = loaded["schema_version"]
+    return policy
+
+
+def resolve_class_policy(policy: Dict[str, Any], dataset: str, category: str) -> Dict[str, Any]:
+    class_key = f"{dataset}/{category}"
+    merged = dict(policy.get("default", {}))
+    class_policy = policy.get("classes", {}).get(class_key, {})
+    if isinstance(class_policy, dict):
+        merged.update(class_policy)
+
+    merged["class_key"] = class_key
+    merged["t_low"] = float(merged.get("t_low", 0.35))
+    merged["t_high"] = float(merged.get("t_high", 0.65))
+    merged["ad_weight"] = float(merged.get("ad_weight", 0.7))
+    merged["use_bbox"] = bool(merged.get("use_bbox", True))
+    merged["min_location_confidence"] = float(merged.get("min_location_confidence", 0.25))
+    merged["reliability"] = str(merged.get("reliability", "high")).lower()
+
+    if merged["t_low"] > merged["t_high"]:
+        merged["t_low"], merged["t_high"] = merged["t_high"], merged["t_low"]
+    return merged
+
+
+def decide_with_policy(anomaly_score: float, class_policy: Dict[str, Any]) -> Tuple[str, bool]:
+    t_low = float(class_policy["t_low"])
+    t_high = float(class_policy["t_high"])
+
+    if anomaly_score < t_low:
+        return "normal", False
+    if anomaly_score > t_high:
+        return "anomaly", False
+    return "review_needed", True
+
+
+def compute_location_confidence(
+    *,
+    anomaly_score: float,
+    class_policy: Dict[str, Any],
+    map_stats: Optional[Dict[str, float]],
+    defect_location: Dict[str, Any],
+    review_needed: bool,
+) -> float:
+    if not defect_location.get("has_defect", False):
+        return 0.0
+
+    t_low = float(class_policy["t_low"])
+    t_high = float(class_policy["t_high"])
+    denom = max(1e-6, t_high - t_low)
+    score_factor = _clip01((anomaly_score - t_low) / denom)
+
+    area_ratio = float(defect_location.get("area_ratio", 0.0))
+    if area_ratio <= 0.2:
+        area_factor = 1.0
+    elif area_ratio <= 0.5:
+        area_factor = 0.7
+    else:
+        area_factor = 0.4
+
+    peak_factor = 0.5
+    if map_stats is not None:
+        max_v = float(map_stats.get("max", 0.0))
+        mean_v = float(map_stats.get("mean", 0.0))
+        std_v = float(map_stats.get("std", 0.0))
+        sharpness = (max_v - mean_v) / max(1e-6, std_v)
+        peak_factor = _clip01(sharpness / 6.0)
+
+    reliability_factor = {
+        "high": 1.0,
+        "medium": 0.75,
+        "low": 0.5,
+    }.get(str(class_policy.get("reliability", "high")), 0.75)
+
+    use_bbox_factor = 1.0 if bool(class_policy.get("use_bbox", True)) else 0.25
+    review_factor = 0.7 if review_needed else 1.0
+
+    score = (0.45 * score_factor + 0.35 * peak_factor + 0.20 * area_factor)
+    score = score * reliability_factor * use_bbox_factor * review_factor
+    return round(_clip01(score), 4)
+
+
+def build_reason_codes(
+    *,
+    anomaly_score: float,
+    class_policy: Dict[str, Any],
+    decision: str,
+    defect_location: Dict[str, Any],
+    location_confidence: float,
+) -> List[str]:
+    codes: List[str] = []
+    t_low = float(class_policy["t_low"])
+    t_high = float(class_policy["t_high"])
+    reliability = str(class_policy.get("reliability", "high"))
+    use_bbox = bool(class_policy.get("use_bbox", True))
+    min_loc_conf = float(class_policy.get("min_location_confidence", 0.25))
+
+    if decision == "review_needed":
+        codes.append("NEAR_DECISION_BAND")
+    if reliability == "low":
+        codes.append("LOW_RELIABILITY_CLASS")
+    elif reliability == "medium":
+        codes.append("MEDIUM_RELIABILITY_CLASS")
+    if not use_bbox:
+        codes.append("BBOX_DISABLED_BY_POLICY")
+    if not defect_location.get("has_defect", False):
+        codes.append("NO_DEFECT_REGION_FROM_MAP")
+    if location_confidence < min_loc_conf:
+        codes.append("LOW_LOCATION_CONFIDENCE")
+
+    if anomaly_score > t_high and defect_location.get("has_defect", False):
+        area_ratio = float(defect_location.get("area_ratio", 0.0))
+        if area_ratio > 0.5:
+            codes.append("DIFFUSE_ANOMALY_REGION")
+    return codes
+
+
+def build_llm_guidance(
+    *,
+    decision: str,
+    class_policy: Dict[str, Any],
+    reason_codes: List[str],
+    location_confidence: float,
+) -> Dict[str, Any]:
+    reliability = str(class_policy.get("reliability", "high"))
+    ad_weight = float(class_policy.get("ad_weight", 0.7))
+    min_loc_conf = float(class_policy.get("min_location_confidence", 0.25))
+
+    if decision == "review_needed" or reliability == "low":
+        anomaly_use = "low"
+    elif reliability == "medium":
+        anomaly_use = "medium"
+    else:
+        anomaly_use = "high"
+
+    if bool(class_policy.get("use_bbox", True)) and location_confidence >= min_loc_conf:
+        if reliability == "high":
+            location_use = "high"
+        elif reliability == "medium":
+            location_use = "medium"
+        else:
+            location_use = "low"
+    else:
+        location_use = "low"
+
+    if decision == "review_needed":
+        instruction = (
+            "AD evidence is ambiguous. Do not make a hard defect claim from AD alone; "
+            "use visual reasoning and mark as needs verification if uncertain."
+        )
+    elif anomaly_use == "low":
+        instruction = (
+            "AD class reliability is low. Use AD score as weak evidence only, and avoid strong location claims."
+        )
+    elif anomaly_use == "medium":
+        instruction = (
+            "AD evidence is usable but not definitive. Cross-check with visual cues before final judgement."
+        )
+    else:
+        instruction = (
+            "AD evidence is reliable for anomaly existence. Use location only when location confidence is sufficient."
+        )
+
+    return {
+        "use_ad_for_anomaly_judgement": anomaly_use,
+        "use_ad_for_location": location_use,
+        "ad_weight": round(_clip01(ad_weight), 4),
+        "location_confidence": location_confidence,
+        "instruction": instruction,
+        "reason_codes": reason_codes,
     }
 
 
@@ -412,52 +678,164 @@ def load_images(mmad_json: Path, *, datasets: Optional[List[str]], categories: O
     return image_paths
 
 
-def save_results(path: Path, results: List[Dict[str, Any]]) -> None:
+def extract_prediction_list(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        predictions = payload.get("predictions")
+        if isinstance(predictions, list):
+            return predictions
+    return []
+
+
+def build_output_payload(
+    *,
+    results: List[Dict[str, Any]],
+    output_format: str,
+    policy: Dict[str, Any],
+    backend: str,
+    model_threshold: float,
+) -> Any:
+    if output_format == "list":
+        return results
+
+    return {
+        "schema_version": "ad_mllm_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "backend": backend,
+        "model_threshold": float(model_threshold),
+        "policy": policy,
+        "predictions": results,
+    }
+
+
+def save_results(
+    path: Path,
+    results: List[Dict[str, Any]],
+    *,
+    output_format: str,
+    policy: Dict[str, Any],
+    backend: str,
+    model_threshold: float,
+) -> None:
+    payload = build_output_payload(
+        results=results,
+        output_format=output_format,
+        policy=policy,
+        backend=backend,
+        model_threshold=model_threshold,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
 def build_result_dict(
     image_path: str,
+    dataset: str,
     category: str,
     pred: Dict[str, Any],
     *,
+    policy: Dict[str, Any],
     include_map_stats: bool,
 ) -> Dict[str, Any]:
     anomaly_score = round(float(pred["anomaly_score"]), 4)
     threshold = float(pred.get("threshold", 0.5))
     anomaly_map = pred.get("anomaly_map")
-    is_anomaly = bool(pred["is_anomaly"])
+    model_is_anomaly = bool(pred["is_anomaly"])
+
+    class_policy = resolve_class_policy(policy, dataset, category)
+    decision, review_needed = decide_with_policy(anomaly_score, class_policy)
+
+    default_location = {
+        "has_defect": False,
+        "region": "none",
+        "bbox": None,
+        "center": None,
+        "area_ratio": 0.0,
+    }
+    map_stats: Optional[Dict[str, float]] = None
+    if anomaly_map is not None:
+        map_stats = {
+            "max": round(float(np.max(anomaly_map)), 4),
+            "mean": round(float(np.mean(anomaly_map)), 4),
+            "std": round(float(np.std(anomaly_map)), 4),
+        }
+        defect_location_raw = compute_defect_location(anomaly_map, threshold)
+    else:
+        defect_location_raw = default_location
+
+    location_confidence = compute_location_confidence(
+        anomaly_score=anomaly_score,
+        class_policy=class_policy,
+        map_stats=map_stats,
+        defect_location=defect_location_raw,
+        review_needed=review_needed,
+    )
+    reason_codes = build_reason_codes(
+        anomaly_score=anomaly_score,
+        class_policy=class_policy,
+        decision=decision,
+        defect_location=defect_location_raw,
+        location_confidence=location_confidence,
+    )
+    llm_guidance = build_llm_guidance(
+        decision=decision,
+        class_policy=class_policy,
+        reason_codes=reason_codes,
+        location_confidence=location_confidence,
+    )
+
+    use_location_for_llm = (
+        bool(class_policy["use_bbox"])
+        and bool(defect_location_raw.get("has_defect", False))
+        and location_confidence >= float(class_policy["min_location_confidence"])
+    )
+
+    llm_location = defect_location_raw if use_location_for_llm else default_location
+    if use_location_for_llm:
+        llm_location = dict(defect_location_raw)
+        llm_location["location_confidence"] = location_confidence
+    else:
+        llm_location = dict(default_location)
+        llm_location["location_confidence"] = location_confidence
 
     out: Dict[str, Any] = {
         "image_path": image_path,
-        "anomaly_score": anomaly_score,
-        "is_anomaly": is_anomaly,
-        "threshold": threshold,
+        "dataset": dataset,
+        "category": category,
         "backend": pred.get("backend"),
+        "anomaly_score": anomaly_score,
+        "model_is_anomaly": model_is_anomaly,
+        "model_threshold": threshold,
+        "decision": decision,
+        "review_needed": review_needed,
+        "policy": {
+            "class_key": class_policy["class_key"],
+            "t_low": class_policy["t_low"],
+            "t_high": class_policy["t_high"],
+            "reliability": class_policy["reliability"],
+            "ad_weight": class_policy["ad_weight"],
+            "use_bbox": class_policy["use_bbox"],
+            "min_location_confidence": class_policy["min_location_confidence"],
+        },
         "confidence": compute_confidence_level(anomaly_score, category),
+        "defect_location_raw": defect_location_raw,
+        "defect_location_for_llm": llm_location,
+        "use_location_for_llm": use_location_for_llm,
+        "mcq_support": {
+            "q1_anomaly_decision": decision,
+            "q1_ad_weight": llm_guidance["ad_weight"],
+            "q3_location_available": use_location_for_llm,
+            "q3_region_hint": llm_location.get("region", "none") if use_location_for_llm else "none",
+            "q3_bbox_hint": llm_location.get("bbox") if use_location_for_llm else None,
+        },
+        "llm_guidance": llm_guidance,
+        "reason_codes": reason_codes,
     }
 
-    if anomaly_map is not None:
-        if is_anomaly:
-            out["defect_location"] = compute_defect_location(anomaly_map, threshold)
-        else:
-            out["defect_location"] = {
-                "has_defect": False,
-                "region": "none",
-                "bbox": None,
-                "center": None,
-                "area_ratio": 0.0,
-            }
-
-        if include_map_stats:
-            out["map_stats"] = {
-                "max": round(float(np.max(anomaly_map)), 4),
-                "mean": round(float(np.mean(anomaly_map)), 4),
-                "std": round(float(np.std(anomaly_map)), 4),
-            }
-
+    if include_map_stats and map_stats is not None:
+        out["map_stats"] = map_stats
     return out
 
 
@@ -508,6 +886,19 @@ def main() -> None:
     parser.add_argument("--mmad-json", type=str, required=True, help="Path to mmad.json")
     parser.add_argument("--max-images", type=int, default=None, help="Maximum images to process")
     parser.add_argument("--output", type=str, default="output/ad_predictions.json", help="Output JSON path")
+    parser.add_argument(
+        "--output-format",
+        type=str,
+        default="mllm",
+        choices=["mllm", "list"],
+        help="Output JSON format: mllm(recommended) or list(legacy)",
+    )
+    parser.add_argument(
+        "--policy-json",
+        type=str,
+        default="configs/ad_policy.json",
+        help="Class policy JSON path for LLM-friendly AD decisioning",
+    )
     parser.add_argument("--resume", action="store_true", help="Resume from existing output")
     parser.add_argument("--save-interval", type=int, default=200, help="Periodic save interval")
     parser.add_argument("--no-map-stats", action="store_true", help="Disable anomaly map summary stats")
@@ -524,6 +915,8 @@ def main() -> None:
     mmad_json = Path(args.mmad_json)
     output_path = Path(args.output)
     include_map_stats = not args.no_map_stats
+    policy_path = Path(args.policy_json) if args.policy_json else None
+    policy = load_ad_policy(policy_path)
 
     if not data_root.exists():
         print(f"Error: Data root not found: {data_root}")
@@ -536,6 +929,8 @@ def main() -> None:
 
     print(f"Backend: {args.backend}")
     print(f"Config: {args.config}")
+    print(f"Output format: {args.output_format}")
+    print(f"Policy: {policy_path if policy_path is not None else 'default (built-in)'}")
     print(f"Version: v{config_version}" if config_version is not None else "Version: latest")
     print(f"Filters: datasets={config_datasets} categories={config_categories}")
     if args.backend == "ckpt":
@@ -577,7 +972,8 @@ def main() -> None:
     existing_results: Dict[str, Dict[str, Any]] = {}
     if args.resume and output_path.exists():
         with open(output_path, "r", encoding="utf-8") as f:
-            existing_list = json.load(f)
+            existing_payload = json.load(f)
+        existing_list = extract_prediction_list(existing_payload)
         existing_results = {r["image_path"]: r for r in existing_list}
         print(f"Loaded {len(existing_results)} existing results")
 
@@ -642,8 +1038,10 @@ def main() -> None:
 
                 result_dict = build_result_dict(
                     image_path,
+                    dataset,
                     category,
                     pred,
+                    policy=policy,
                     include_map_stats=include_map_stats,
                 )
                 results.append(result_dict)
@@ -655,7 +1053,14 @@ def main() -> None:
                         torch.cuda.empty_cache()
 
                 if args.save_interval > 0 and processed % args.save_interval == 0:
-                    save_results(output_path, results)
+                    save_results(
+                        output_path,
+                        results,
+                        output_format=args.output_format,
+                        policy=policy,
+                        backend=args.backend,
+                        model_threshold=args.threshold,
+                    )
 
             except Exception:
                 errors += 1
@@ -671,7 +1076,14 @@ def main() -> None:
         if not args.keep_model_cache:
             runner.clear_cache()
 
-    save_results(output_path, results)
+    save_results(
+        output_path,
+        results,
+        output_format=args.output_format,
+        policy=policy,
+        backend=args.backend,
+        model_threshold=args.threshold,
+    )
 
     processed_from_this_run = max(0, processed - len(existing_results))
     ms_per_img = (total_inference_time / processed_from_this_run * 1000.0) if processed_from_this_run > 0 else 0.0
