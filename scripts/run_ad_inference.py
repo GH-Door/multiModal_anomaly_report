@@ -49,14 +49,6 @@ if str(PROJ_ROOT) not in sys.path:
 from src.anomaly import PatchCoreModelManager
 from src.utils.loaders import load_config
 
-
-LOW_RELIABILITY_CLASSES = {
-    "screw_bag",
-    "pushpins",
-    "breakfast_box",
-    "juice_bottle",
-}
-
 DEFAULT_AD_POLICY: Dict[str, Any] = {
     "schema_version": "ad_policy_v1",
     "default": {
@@ -170,9 +162,7 @@ def _load_image_job(job: Tuple[Path, int]) -> Tuple[Optional[np.ndarray], Option
     return load_image_for_inference(image_path, decode_reduced)
 
 
-def compute_confidence_level(anomaly_score: float, category: str) -> Dict[str, Any]:
-    is_low_reliability = category in LOW_RELIABILITY_CLASSES
-
+def compute_confidence_level(anomaly_score: float) -> Dict[str, Any]:
     if anomaly_score > 0.8:
         level = "high"
         reason = "Strong anomaly signal (score > 0.8)"
@@ -186,20 +176,11 @@ def compute_confidence_level(anomaly_score: float, category: str) -> Dict[str, A
         level = "low"
         reason = "Score near decision boundary (0.4-0.6)"
 
-    if is_low_reliability:
-        reliability = "low"
-        reliability_reason = (
-            f"Class '{category}' contains logical anomalies that PatchCore cannot reliably detect"
-        )
-    else:
-        reliability = "high"
-        reliability_reason = "Structural anomaly class - PatchCore reliable"
-
     return {
         "level": level,
-        "reliability": reliability,
+        "reliability": "high",
         "reason": reason,
-        "reliability_reason": reliability_reason,
+        "reliability_reason": "Policy-controlled reliability",
     }
 
 
@@ -645,10 +626,6 @@ class PatchCoreCheckpointRunner:
         img = img.transpose(2, 0, 1)
         return torch.from_numpy(img)
 
-    def _preprocess(self, image: np.ndarray) -> torch.Tensor:
-        tensor = self._preprocess_tensor(image).unsqueeze(0).float()
-        return tensor.to(self.device, non_blocking=True)
-
     def _preprocess_batch(self, images: List[np.ndarray]) -> torch.Tensor:
         batch = torch.stack([self._preprocess_tensor(img) for img in images], dim=0).float()
         return batch.to(self.device, non_blocking=True)
@@ -919,7 +896,7 @@ def build_result_dict(
 
     class_policy = resolve_class_policy(policy, dataset, category)
     decision, review_needed = decide_with_policy(anomaly_score, class_policy)
-    confidence = compute_confidence_level(anomaly_score, category)
+    confidence = compute_confidence_level(anomaly_score)
     confidence["reliability"] = class_policy["reliability"]
     if class_policy["reliability"] == "low":
         confidence["reliability_reason"] = "Policy marks this class as low reliability for AD-only judgement."

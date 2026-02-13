@@ -88,14 +88,6 @@ def extract_prediction_list(payload: Any) -> List[Dict[str, Any]]:
     return []
 
 
-def load_json_dict(path: Path) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        raise ValueError(f"Expected JSON object in {path}")
-    return data
-
-
 def load_predictions_index(pred_json: Path) -> Dict[str, Dict[str, Any]]:
     with open(pred_json, "r", encoding="utf-8") as f:
         payload = json.load(f)
@@ -551,7 +543,7 @@ def main() -> None:
     parser.add_argument("--panel-size", type=int, default=420, help="Single panel size")
     parser.add_argument("--amp", action="store_true", dest="amp", help="Enable AMP")
     parser.add_argument("--no-amp", action="store_false", dest="amp", help="Disable AMP")
-    parser.set_defaults(amp=True, include_good=True)
+    parser.set_defaults(amp=True)
     args = parser.parse_args()
 
     checkpoint_dir = Path(args.checkpoint_dir)
@@ -702,4 +694,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
