@@ -9,8 +9,11 @@ dataset/
 datasets/
 results/
 output/
-imagenette/
 pre_trained/
+imagenette
+imagenette/
+**/imagenette
+**/imagenette/
 
 # ===== Python =====
 __pycache__/
@@ -55,3 +58,6 @@ GEMINI.md
 # ===== google drive desktop ====
 .tmp.drivedownload
 .tmp.driveupload
+
+# vectorstore
+vectorstore/
