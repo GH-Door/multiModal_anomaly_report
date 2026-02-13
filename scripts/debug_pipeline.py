@@ -202,7 +202,7 @@ def run_inference_test(runner, dataset: str, category: str):
     model = Patchcore.load_from_checkpoint(str(ckpt_path), map_location="cpu", weights_only=False)
     model.eval()
 
-    # Preprocess (same as run_ad_inference_ckpt.py)
+    # Preprocess (same as run_ad_inference.py ckpt backend)
     img = cv2.imread(str(test_image))
     h, w = runner.image_size
     img = cv2.resize(img, (w, h))

@@ -221,6 +221,9 @@ def main():
     data_root = Path(args.data_root)
     config = load_config(args.config)
 
+    def has_supported_model(category_dir: Path) -> bool:
+        return (category_dir / "backbone.onnx").exists() or (category_dir / "model.onnx").exists()
+
     # Get categories to evaluate
     if args.dataset and args.category:
         categories = [(args.dataset, args.category)]
@@ -236,7 +239,7 @@ def main():
             for cat_dir in sorted(dataset_path.iterdir()):
                 if not cat_dir.is_dir():
                     continue
-                if (cat_dir / "model.onnx").exists():
+                if has_supported_model(cat_dir):
                     if cat_filter is None or cat_dir.name in cat_filter:
                         categories.append((dataset, cat_dir.name))
 
@@ -248,15 +251,15 @@ def main():
 
     for dataset, category in tqdm(categories, desc="Evaluating", unit="category"):
         key = f"{dataset}/{category}"
-        model_path = models_dir / dataset / category / "model.onnx"
+        model_dir = models_dir / dataset / category
 
-        if not model_path.exists():
+        if not has_supported_model(model_dir):
             print(f"  {key}: Model not found")
             continue
 
         # Load model
         model = PatchCoreOnnx(
-            model_path=model_path,
+            model_path=model_dir,
             threshold=args.threshold,
             device=args.device,
         )
