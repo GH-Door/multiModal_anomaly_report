@@ -1024,8 +1024,9 @@ def main() -> None:
         help="Class policy JSON path for report-oriented AD decisioning",
     )
     parser.add_argument("--resume", action="store_true", help="Resume from existing output")
-    parser.add_argument("--save-interval", type=int, default=200, help="Periodic save interval")
+    parser.add_argument("--save-interval", type=int, default=0, help="Periodic save interval (0=save only at end)")
     parser.add_argument("--no-map-stats", action="store_true", help="Disable anomaly map summary stats")
+    parser.add_argument("--profile-interval", type=int, default=128, help="Print stage timing every N processed images (0=disabled)")
 
     # Stability/perf knobs
     parser.add_argument("--allow-online-backbone", action="store_true", help="Allow online backbone resolution when checkpoint loading fails")
@@ -1042,7 +1043,7 @@ def main() -> None:
     )
     parser.add_argument("--amp", action="store_true", dest="amp", help="Enable CUDA mixed precision")
     parser.add_argument("--no-amp", action="store_false", dest="amp", help="Disable CUDA mixed precision")
-    parser.set_defaults(amp=True, keep_model_cache=True)
+    parser.set_defaults(amp=True, keep_model_cache=False)
 
     args = parser.parse_args()
 
@@ -1067,6 +1068,8 @@ def main() -> None:
     print(f"Output format: {args.output_format}")
     print(f"Policy: {policy_path if policy_path is not None else 'default (built-in)'}")
     print(f"Batch size: {args.batch_size}")
+    print(f"Save interval: {args.save_interval}")
+    print(f"Profile interval: {args.profile_interval}")
     print(f"Postprocess map: {args.postprocess_map}")
     print(f"AMP: {args.amp}")
     print(f"Keep model cache: {args.keep_model_cache}")
@@ -1147,6 +1150,11 @@ def main() -> None:
     processed = len(existing_results)
     errors = 0
     total_inference_time = 0.0
+    window_read_time = 0.0
+    window_infer_time = 0.0
+    window_build_time = 0.0
+    window_save_time = 0.0
+    window_images = 0
 
     for (dataset, category), cat_images in images_by_category.items():
         cat_key = f"{dataset}/{category}"
@@ -1163,6 +1171,7 @@ def main() -> None:
         pbar = tqdm(total=len(cat_images), desc=f"  {cat_key}", ncols=100, leave=False)
 
         for batch_paths in chunked(cat_images, max(1, int(args.batch_size))):
+            read_t0 = time.perf_counter()
             batch_images: List[np.ndarray] = []
             valid_paths: List[str] = []
             for image_path in batch_paths:
@@ -1176,6 +1185,7 @@ def main() -> None:
                     continue
                 batch_images.append(image)
                 valid_paths.append(image_path)
+            window_read_time += time.perf_counter() - read_t0
 
             if not batch_images:
                 pbar.update(len(batch_paths))
@@ -1187,6 +1197,7 @@ def main() -> None:
                 preds = runner.predict_batch(dataset, category, batch_images)
                 infer_time = time.perf_counter() - t0
                 total_inference_time += infer_time
+                window_infer_time += infer_time
             except RuntimeError as exc:
                 if _is_oom_error(exc) and len(batch_images) > 1:
                     if torch.cuda.is_available():
@@ -1198,6 +1209,7 @@ def main() -> None:
                             pred = runner.predict(dataset, category, single_img)
                             infer_time = time.perf_counter() - t0
                             total_inference_time += infer_time
+                            window_infer_time += infer_time
                             preds.append(pred)
                         except Exception:
                             preds.append(None)
@@ -1217,6 +1229,7 @@ def main() -> None:
                     errors += 1
                     continue
                 try:
+                    build_t0 = time.perf_counter()
                     result_dict = build_result_dict(
                         image_path,
                         dataset,
@@ -1225,8 +1238,10 @@ def main() -> None:
                         policy=policy,
                         include_map_stats=include_map_stats,
                     )
+                    window_build_time += time.perf_counter() - build_t0
                     results.append(result_dict)
                     processed += 1
+                    window_images += 1
 
                     if args.gc_interval > 0 and processed % args.gc_interval == 0:
                         gc.collect()
@@ -1234,6 +1249,7 @@ def main() -> None:
                             torch.cuda.empty_cache()
 
                     if args.save_interval > 0 and processed % args.save_interval == 0:
+                        save_t0 = time.perf_counter()
                         save_results(
                             output_path,
                             results,
@@ -1242,8 +1258,33 @@ def main() -> None:
                             backend=args.backend,
                             model_threshold=args.threshold,
                         )
+                        window_save_time += time.perf_counter() - save_t0
                 except Exception:
                     errors += 1
+
+            if args.profile_interval > 0 and window_images >= args.profile_interval:
+                read_ms = (window_read_time / max(1, window_images)) * 1000.0
+                infer_ms = (window_infer_time / max(1, window_images)) * 1000.0
+                build_ms = (window_build_time / max(1, window_images)) * 1000.0
+                save_ms = (window_save_time / max(1, window_images)) * 1000.0
+                if torch.cuda.is_available():
+                    mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
+                    mem_rsrv = torch.cuda.memory_reserved() / (1024 ** 3)
+                    print(
+                        f"  [profile] {window_images} imgs | read {read_ms:.1f} ms/img | "
+                        f"infer {infer_ms:.1f} ms/img | build {build_ms:.1f} ms/img | "
+                        f"save {save_ms:.1f} ms/img | gpu alloc/reserved {mem_alloc:.2f}/{mem_rsrv:.2f} GB"
+                    )
+                else:
+                    print(
+                        f"  [profile] {window_images} imgs | read {read_ms:.1f} ms/img | "
+                        f"infer {infer_ms:.1f} ms/img | build {build_ms:.1f} ms/img | save {save_ms:.1f} ms/img"
+                    )
+                window_read_time = 0.0
+                window_infer_time = 0.0
+                window_build_time = 0.0
+                window_save_time = 0.0
+                window_images = 0
 
             pbar.update(len(batch_paths))
             pbar.set_postfix({"done": processed, "err": errors})
