@@ -28,6 +28,7 @@ import inspect
 import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 import cv2
 import numpy as np
 import torch
+from PIL import Image
 from torch.nn.functional import interpolate
 from tqdm import tqdm
 
@@ -137,6 +139,35 @@ def chunked(items: List[str], chunk_size: int) -> Iterator[List[str]]:
         chunk_size = 1
     for i in range(0, len(items), chunk_size):
         yield items[i : i + chunk_size]
+
+
+def load_image_for_inference(image_path: Path, decode_reduced: int) -> Tuple[Optional[np.ndarray], Optional[Tuple[int, int]]]:
+    original_size: Optional[Tuple[int, int]] = None
+    try:
+        with Image.open(image_path) as img:
+            original_size = (int(img.height), int(img.width))
+    except Exception:
+        original_size = None
+
+    flags = {
+        1: cv2.IMREAD_COLOR,
+        2: cv2.IMREAD_REDUCED_COLOR_2,
+        4: cv2.IMREAD_REDUCED_COLOR_4,
+        8: cv2.IMREAD_REDUCED_COLOR_8,
+    }
+    image = cv2.imread(str(image_path), flags.get(int(decode_reduced), cv2.IMREAD_COLOR))
+    if image is None:
+        return None, None
+
+    if original_size is None:
+        h, w = image.shape[:2]
+        original_size = (int(h), int(w))
+    return image, original_size
+
+
+def _load_image_job(job: Tuple[Path, int]) -> Tuple[Optional[np.ndarray], Optional[Tuple[int, int]]]:
+    image_path, decode_reduced = job
+    return load_image_for_inference(image_path, decode_reduced)
 
 
 def compute_confidence_level(anomaly_score: float, category: str) -> Dict[str, Any]:
@@ -635,16 +666,31 @@ class PatchCoreCheckpointRunner:
             torch.cuda.synchronize()
         self._warmup_done.add(key)
 
-    def predict(self, dataset: str, category: str, image: np.ndarray) -> Dict[str, Any]:
-        return self.predict_batch(dataset, category, [image])[0]
+    def predict(
+        self,
+        dataset: str,
+        category: str,
+        image: np.ndarray,
+        original_size: Optional[Tuple[int, int]] = None,
+    ) -> Dict[str, Any]:
+        original_sizes = [original_size] if original_size is not None else None
+        return self.predict_batch(dataset, category, [image], original_sizes=original_sizes)[0]
 
-    def predict_batch(self, dataset: str, category: str, images: List[np.ndarray]) -> List[Dict[str, Any]]:
+    def predict_batch(
+        self,
+        dataset: str,
+        category: str,
+        images: List[np.ndarray],
+        *,
+        original_sizes: Optional[List[Tuple[int, int]]] = None,
+    ) -> List[Dict[str, Any]]:
         if not images:
             return []
 
         model = self.get_model(dataset, category)
         input_tensor = self._preprocess_batch(images)
-        original_sizes = [img.shape[:2] for img in images]
+        if original_sizes is None or len(original_sizes) != len(images):
+            original_sizes = [img.shape[:2] for img in images]
 
         with torch.inference_mode():
             if self.use_amp:
@@ -685,7 +731,8 @@ class PatchCoreCheckpointRunner:
                 if self.postprocess_map == "original":
                     if map_i.shape[-2:] != (original_size[0], original_size[1]):
                         map_i = interpolate(map_i, size=original_size, mode="bilinear", align_corners=False)
-                anomaly_map_np = map_i[0, 0].detach().cpu().numpy()
+                # AMP(fp16) path can overflow in numpy reductions; keep map in fp32 for stable stats/location.
+                anomaly_map_np = map_i[0, 0].detach().float().cpu().numpy()
 
             if scores is not None:
                 anomaly_score = float(scores[idx])
@@ -740,7 +787,13 @@ class PatchCoreOnnxRunner:
         # ONNXRuntime session is initialized lazily on first get_model.
         _ = self.manager.get_model(dataset, category)
 
-    def predict(self, dataset: str, category: str, image: np.ndarray) -> Dict[str, Any]:
+    def predict(
+        self,
+        dataset: str,
+        category: str,
+        image: np.ndarray,
+        original_size: Optional[Tuple[int, int]] = None,
+    ) -> Dict[str, Any]:
         result = self.manager.predict(dataset, category, image)
         return {
             "anomaly_score": float(result.anomaly_score),
@@ -748,10 +801,20 @@ class PatchCoreOnnxRunner:
             "is_anomaly": bool(result.is_anomaly),
             "threshold": float(result.threshold),
             "backend": "onnx",
+            "original_size": [int(original_size[0]), int(original_size[1])] if original_size is not None else None,
         }
 
-    def predict_batch(self, dataset: str, category: str, images: List[np.ndarray]) -> List[Dict[str, Any]]:
-        return [self.predict(dataset, category, image) for image in images]
+    def predict_batch(
+        self,
+        dataset: str,
+        category: str,
+        images: List[np.ndarray],
+        *,
+        original_sizes: Optional[List[Tuple[int, int]]] = None,
+    ) -> List[Dict[str, Any]]:
+        if original_sizes is None or len(original_sizes) != len(images):
+            original_sizes = [img.shape[:2] for img in images]
+        return [self.predict(dataset, category, image, original_size=size) for image, size in zip(images, original_sizes)]
 
     def clear_cache(self) -> None:
         self.manager.clear_cache()
@@ -1009,6 +1072,8 @@ def main() -> None:
     parser.add_argument("--mmad-json", type=str, required=True, help="Path to mmad.json")
     parser.add_argument("--max-images", type=int, default=None, help="Maximum images to process")
     parser.add_argument("--batch-size", type=int, default=8, help="Inference batch size per category")
+    parser.add_argument("--io-workers", type=int, default=8, help="Parallel workers for image loading")
+    parser.add_argument("--decode-reduced", type=int, default=1, choices=[1, 2, 4, 8], help="OpenCV reduced decode factor for faster loading (1=full)")
     parser.add_argument("--output", type=str, default="output/ad_predictions.json", help="Output JSON path")
     parser.add_argument(
         "--output-format",
@@ -1068,6 +1133,8 @@ def main() -> None:
     print(f"Output format: {args.output_format}")
     print(f"Policy: {policy_path if policy_path is not None else 'default (built-in)'}")
     print(f"Batch size: {args.batch_size}")
+    print(f"IO workers: {args.io_workers}")
+    print(f"Decode reduced: x{args.decode_reduced}")
     print(f"Save interval: {args.save_interval}")
     print(f"Profile interval: {args.profile_interval}")
     print(f"Postprocess map: {args.postprocess_map}")
@@ -1139,6 +1206,9 @@ def main() -> None:
             continue
         images_by_category[(dataset, category)].append(image_path)
 
+    for key in images_by_category:
+        images_by_category[key].sort()
+
     total_to_process = sum(len(v) for v in images_by_category.values())
     print()
     print("=" * 60)
@@ -1155,114 +1225,167 @@ def main() -> None:
     window_build_time = 0.0
     window_save_time = 0.0
     window_images = 0
+    io_workers = max(1, int(args.io_workers))
+    io_pool = ThreadPoolExecutor(max_workers=io_workers) if io_workers > 1 else None
 
-    for (dataset, category), cat_images in images_by_category.items():
-        cat_key = f"{dataset}/{category}"
-        print(f"\n[{cat_key}] Loading model and processing {len(cat_images)} images...")
-
-        try:
-            runner.warmup_model(dataset, category)
-        except Exception as exc:
-            print(f"  Failed to load model: {exc}")
-            errors += len(cat_images)
-            continue
-
-        cat_start = time.perf_counter()
-        pbar = tqdm(total=len(cat_images), desc=f"  {cat_key}", ncols=100, leave=False)
-
-        for batch_paths in chunked(cat_images, max(1, int(args.batch_size))):
-            read_t0 = time.perf_counter()
-            batch_images: List[np.ndarray] = []
-            valid_paths: List[str] = []
-            for image_path in batch_paths:
-                image_full_path = data_root / image_path
-                if not image_full_path.exists():
-                    errors += 1
-                    continue
-                image = cv2.imread(str(image_full_path))
-                if image is None:
-                    errors += 1
-                    continue
-                batch_images.append(image)
-                valid_paths.append(image_path)
-            window_read_time += time.perf_counter() - read_t0
-
-            if not batch_images:
-                pbar.update(len(batch_paths))
-                pbar.set_postfix({"done": processed, "err": errors})
-                continue
+    try:
+        for (dataset, category), cat_images in images_by_category.items():
+            cat_key = f"{dataset}/{category}"
+            print(f"\n[{cat_key}] Loading model and processing {len(cat_images)} images...")
 
             try:
-                t0 = time.perf_counter()
-                preds = runner.predict_batch(dataset, category, batch_images)
-                infer_time = time.perf_counter() - t0
-                total_inference_time += infer_time
-                window_infer_time += infer_time
-            except RuntimeError as exc:
-                if _is_oom_error(exc) and len(batch_images) > 1:
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    preds: List[Optional[Dict[str, Any]]] = []
-                    for single_img in batch_images:
-                        try:
-                            t0 = time.perf_counter()
-                            pred = runner.predict(dataset, category, single_img)
-                            infer_time = time.perf_counter() - t0
-                            total_inference_time += infer_time
-                            window_infer_time += infer_time
-                            preds.append(pred)
-                        except Exception:
-                            preds.append(None)
+                runner.warmup_model(dataset, category)
+            except Exception as exc:
+                print(f"  Failed to load model: {exc}")
+                errors += len(cat_images)
+                continue
+
+            cat_start = time.perf_counter()
+            pbar = tqdm(total=len(cat_images), desc=f"  {cat_key}", ncols=100, leave=False)
+
+            for batch_paths in chunked(cat_images, max(1, int(args.batch_size))):
+                read_t0 = time.perf_counter()
+                batch_images: List[np.ndarray] = []
+                batch_original_sizes: List[Tuple[int, int]] = []
+                valid_paths: List[str] = []
+                read_inputs: List[Tuple[str, Path]] = []
+                for image_path in batch_paths:
+                    image_full_path = data_root / image_path
+                    if not image_full_path.exists():
+                        errors += 1
+                        continue
+                    read_inputs.append((image_path, image_full_path))
+
+                read_jobs = [(path, int(args.decode_reduced)) for _, path in read_inputs]
+                if io_pool is not None:
+                    decoded = list(io_pool.map(_load_image_job, read_jobs))
                 else:
+                    decoded = [_load_image_job(job) for job in read_jobs]
+
+                for (image_path, _), (image, original_size) in zip(read_inputs, decoded):
+                    if image is None or original_size is None:
+                        errors += 1
+                        continue
+                    batch_images.append(image)
+                    batch_original_sizes.append(original_size)
+                    valid_paths.append(image_path)
+                window_read_time += time.perf_counter() - read_t0
+
+                if not batch_images:
+                    pbar.update(len(batch_paths))
+                    pbar.set_postfix({"done": processed, "err": errors})
+                    continue
+
+                try:
+                    t0 = time.perf_counter()
+                    preds = runner.predict_batch(
+                        dataset,
+                        category,
+                        batch_images,
+                        original_sizes=batch_original_sizes,
+                    )
+                    infer_time = time.perf_counter() - t0
+                    total_inference_time += infer_time
+                    window_infer_time += infer_time
+                except RuntimeError as exc:
+                    if _is_oom_error(exc) and len(batch_images) > 1:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        preds: List[Optional[Dict[str, Any]]] = []
+                        for single_img, single_original_size in zip(batch_images, batch_original_sizes):
+                            try:
+                                t0 = time.perf_counter()
+                                pred = runner.predict(
+                                    dataset,
+                                    category,
+                                    single_img,
+                                    original_size=single_original_size,
+                                )
+                                infer_time = time.perf_counter() - t0
+                                total_inference_time += infer_time
+                                window_infer_time += infer_time
+                                preds.append(pred)
+                            except Exception:
+                                preds.append(None)
+                    else:
+                        errors += len(valid_paths)
+                        pbar.update(len(batch_paths))
+                        pbar.set_postfix({"done": processed, "err": errors})
+                        continue
+                except Exception:
                     errors += len(valid_paths)
                     pbar.update(len(batch_paths))
                     pbar.set_postfix({"done": processed, "err": errors})
                     continue
-            except Exception:
-                errors += len(valid_paths)
+
+                for image_path, pred in zip(valid_paths, preds):
+                    if pred is None:
+                        errors += 1
+                        continue
+                    try:
+                        build_t0 = time.perf_counter()
+                        result_dict = build_result_dict(
+                            image_path,
+                            dataset,
+                            category,
+                            pred,
+                            policy=policy,
+                            include_map_stats=include_map_stats,
+                        )
+                        window_build_time += time.perf_counter() - build_t0
+                        results.append(result_dict)
+                        processed += 1
+                        window_images += 1
+
+                        if args.gc_interval > 0 and processed % args.gc_interval == 0:
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+
+                        if args.save_interval > 0 and processed % args.save_interval == 0:
+                            save_t0 = time.perf_counter()
+                            save_results(
+                                output_path,
+                                results,
+                                output_format=args.output_format,
+                                policy=policy,
+                                backend=args.backend,
+                                model_threshold=args.threshold,
+                            )
+                            window_save_time += time.perf_counter() - save_t0
+                    except Exception:
+                        errors += 1
+
+                if args.profile_interval > 0 and window_images >= args.profile_interval:
+                    read_ms = (window_read_time / max(1, window_images)) * 1000.0
+                    infer_ms = (window_infer_time / max(1, window_images)) * 1000.0
+                    build_ms = (window_build_time / max(1, window_images)) * 1000.0
+                    save_ms = (window_save_time / max(1, window_images)) * 1000.0
+                    if torch.cuda.is_available():
+                        mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
+                        mem_rsrv = torch.cuda.memory_reserved() / (1024 ** 3)
+                        print(
+                            f"  [profile] {window_images} imgs | read {read_ms:.1f} ms/img | "
+                            f"infer {infer_ms:.1f} ms/img | build {build_ms:.1f} ms/img | "
+                            f"save {save_ms:.1f} ms/img | gpu alloc/reserved {mem_alloc:.2f}/{mem_rsrv:.2f} GB"
+                        )
+                    else:
+                        print(
+                            f"  [profile] {window_images} imgs | read {read_ms:.1f} ms/img | "
+                            f"infer {infer_ms:.1f} ms/img | build {build_ms:.1f} ms/img | save {save_ms:.1f} ms/img"
+                        )
+                    window_read_time = 0.0
+                    window_infer_time = 0.0
+                    window_build_time = 0.0
+                    window_save_time = 0.0
+                    window_images = 0
+
                 pbar.update(len(batch_paths))
                 pbar.set_postfix({"done": processed, "err": errors})
-                continue
 
-            for image_path, pred in zip(valid_paths, preds):
-                if pred is None:
-                    errors += 1
-                    continue
-                try:
-                    build_t0 = time.perf_counter()
-                    result_dict = build_result_dict(
-                        image_path,
-                        dataset,
-                        category,
-                        pred,
-                        policy=policy,
-                        include_map_stats=include_map_stats,
-                    )
-                    window_build_time += time.perf_counter() - build_t0
-                    results.append(result_dict)
-                    processed += 1
-                    window_images += 1
+            pbar.close()
 
-                    if args.gc_interval > 0 and processed % args.gc_interval == 0:
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-
-                    if args.save_interval > 0 and processed % args.save_interval == 0:
-                        save_t0 = time.perf_counter()
-                        save_results(
-                            output_path,
-                            results,
-                            output_format=args.output_format,
-                            policy=policy,
-                            backend=args.backend,
-                            model_threshold=args.threshold,
-                        )
-                        window_save_time += time.perf_counter() - save_t0
-                except Exception:
-                    errors += 1
-
-            if args.profile_interval > 0 and window_images >= args.profile_interval:
+            if args.profile_interval > 0 and window_images > 0:
                 read_ms = (window_read_time / max(1, window_images)) * 1000.0
                 infer_ms = (window_infer_time / max(1, window_images)) * 1000.0
                 build_ms = (window_build_time / max(1, window_images)) * 1000.0
@@ -1271,13 +1394,13 @@ def main() -> None:
                     mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
                     mem_rsrv = torch.cuda.memory_reserved() / (1024 ** 3)
                     print(
-                        f"  [profile] {window_images} imgs | read {read_ms:.1f} ms/img | "
+                        f"  [profile-tail] {window_images} imgs | read {read_ms:.1f} ms/img | "
                         f"infer {infer_ms:.1f} ms/img | build {build_ms:.1f} ms/img | "
                         f"save {save_ms:.1f} ms/img | gpu alloc/reserved {mem_alloc:.2f}/{mem_rsrv:.2f} GB"
                     )
                 else:
                     print(
-                        f"  [profile] {window_images} imgs | read {read_ms:.1f} ms/img | "
+                        f"  [profile-tail] {window_images} imgs | read {read_ms:.1f} ms/img | "
                         f"infer {infer_ms:.1f} ms/img | build {build_ms:.1f} ms/img | save {save_ms:.1f} ms/img"
                     )
                 window_read_time = 0.0
@@ -1286,17 +1409,15 @@ def main() -> None:
                 window_save_time = 0.0
                 window_images = 0
 
-            pbar.update(len(batch_paths))
-            pbar.set_postfix({"done": processed, "err": errors})
+            cat_elapsed = time.perf_counter() - cat_start
+            cat_ms_per_img = (cat_elapsed / len(cat_images) * 1000.0) if cat_images else 0.0
+            print(f"  Done: {len(cat_images)} images in {cat_elapsed:.1f}s ({cat_ms_per_img:.0f}ms/img)")
 
-        pbar.close()
-
-        cat_elapsed = time.perf_counter() - cat_start
-        cat_ms_per_img = (cat_elapsed / len(cat_images) * 1000.0) if cat_images else 0.0
-        print(f"  Done: {len(cat_images)} images in {cat_elapsed:.1f}s ({cat_ms_per_img:.0f}ms/img)")
-
-        if not args.keep_model_cache:
-            runner.clear_cache()
+            if not args.keep_model_cache:
+                runner.clear_cache()
+    finally:
+        if io_pool is not None:
+            io_pool.shutdown(wait=True)
 
     save_results(
         output_path,
