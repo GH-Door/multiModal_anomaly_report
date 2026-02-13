@@ -245,6 +245,23 @@ def heatmap_plot(data, ax=None, figsize=(12, 8), cmap='Blues', annot=True, fmt='
     return ax
 
 
+def img_plot(path, ax=None, figsize=(6, 6), title=None, show=True):
+    """이미지 파일 시각화. subplot 호환."""
+    if ax is None:
+        plt.figure(figsize=figsize)
+        ax = plt.gca()
+
+    img = Image.open(path).convert("RGB")
+    ax.imshow(np.array(img))
+    ax.set_title(title if title else Path(path).name)
+    ax.axis("off")
+
+    if show:
+        plt.tight_layout()
+        plt.show()
+    return ax
+
+
 # Anomaly Detection Visualization Functions
 
 def tensor_to_numpy(tensor):

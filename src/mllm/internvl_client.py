@@ -12,6 +12,7 @@ from PIL import Image
 from torchvision.transforms.functional import InterpolationMode
 
 from .base import BaseLLMClient, INSTRUCTION, INSTRUCTION_WITH_AD, format_ad_info
+from src.utils.device import get_device
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,7 @@ class InternVLClient(BaseLLMClient):
     def __init__(
         self,
         model_path: str = "OpenGVLab/InternVL2-8B",
-        device: str = "cuda",
+        device: str = None,
         torch_dtype: str = "bfloat16",
         max_new_tokens: int = 128,
         num_gpus: int = 1,
@@ -147,7 +148,7 @@ class InternVLClient(BaseLLMClient):
     ):
         super().__init__(**kwargs)
         self.model_path = model_path
-        self.device = device
+        self.device = device or str(get_device(verbose=False))
         self.torch_dtype_str = torch_dtype
         self.max_new_tokens = max_new_tokens
         self.num_gpus = num_gpus
@@ -231,8 +232,8 @@ class InternVLClient(BaseLLMClient):
                 self.model_path, **load_kwargs
             ).eval()
 
-        if self.num_gpus <= 1 and self.device == "cuda" and torch.cuda.is_available():
-            self._model = self._model.cuda()
+        if self.num_gpus <= 1:
+            self._model = self._model.to(self.device)
 
         self._tokenizer = AutoTokenizer.from_pretrained(
             self.model_path,
@@ -284,15 +285,13 @@ class InternVLClient(BaseLLMClient):
 
         # Load images
         query_image = load_image(payload["query_image"], max_num=self.max_patches).to(torch_dtype)
-        if self.device == "cuda":
-            query_image = query_image.cuda()
+        query_image = query_image.to(self.device)
 
         template_images = []
         for ref_path in payload["few_shot_paths"]:
             try:
                 img = load_image(ref_path, max_num=self.max_patches).to(torch_dtype)
-                if self.device == "cuda":
-                    img = img.cuda()
+                img = img.to(self.device)
                 template_images.append(img)
             except Exception as e:
                 continue
@@ -338,15 +337,13 @@ class InternVLClient(BaseLLMClient):
 
         # Load images once
         query_image = load_image(query_image_path, max_num=self.max_patches).to(torch_dtype)
-        if self.device == "cuda":
-            query_image = query_image.cuda()
+        query_image = query_image.to(self.device)
 
         template_images = []
         for ref_path in few_shot_paths:
             try:
                 img = load_image(ref_path, max_num=self.max_patches).to(torch_dtype)
-                if self.device == "cuda":
-                    img = img.cuda()
+                img = img.to(self.device)
                 template_images.append(img)
             except Exception as e:
                 continue
@@ -417,15 +414,13 @@ class InternVLClient(BaseLLMClient):
 
         # Load images once
         query_image = load_image(query_image_path, max_num=self.max_patches).to(torch_dtype)
-        if self.device == "cuda":
-            query_image = query_image.cuda()
+        query_image = query_image.to(self.device)
 
         template_images = []
         for ref_path in few_shot_paths:
             try:
                 img = load_image(ref_path, max_num=self.max_patches).to(torch_dtype)
-                if self.device == "cuda":
-                    img = img.cuda()
+                img = img.to(self.device)
                 template_images.append(img)
             except Exception:
                 continue

@@ -8,6 +8,7 @@ import cv2
 import torch
 
 from .base import BaseLLMClient, INSTRUCTION, INSTRUCTION_WITH_AD, format_ad_info
+from src.utils.device import get_device
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ class LLaVAClient(BaseLLMClient):
     def __init__(
         self,
         model_path: str = "llava-hf/llava-1.5-7b-hf",
-        device: str = "cuda",
+        device: str = None,
         torch_dtype: str = "float16",
         max_new_tokens: int = 128,
         use_hf: bool = True,  # Use HuggingFace transformers (recommended)
@@ -39,7 +40,7 @@ class LLaVAClient(BaseLLMClient):
     ):
         super().__init__(**kwargs)
         self.model_path = model_path
-        self.device = device
+        self.device = device or str(get_device(verbose=False))
         self.torch_dtype_str = torch_dtype
         self.max_new_tokens = max_new_tokens
         self.use_hf = use_hf
@@ -218,7 +219,7 @@ class LLaVAClient(BaseLLMClient):
 
         input_ids = tokenizer_image_token(
             prompt, self._tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt'
-        ).unsqueeze(0).cuda()
+        ).unsqueeze(0).to(self.device)
 
         # Process images
         ref_images = []
@@ -239,7 +240,7 @@ class LLaVAClient(BaseLLMClient):
         else:
             image_tensor = self._image_processor.preprocess(images, return_tensors="pt")["pixel_values"]
 
-        image_tensor = [img.unsqueeze(0).half().cuda() for img in image_tensor]
+        image_tensor = [img.unsqueeze(0).half().to(self.device) for img in image_tensor]
         image_sizes = [img.size for img in images]
 
         # Generate

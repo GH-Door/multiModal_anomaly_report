@@ -42,6 +42,57 @@ Finally, you should output a list of answer, such as:
 
 
 
+REPORT_PROMPT_RAG = '''You are an expert industrial quality inspector.
+Look at this product image carefully and determine if there are any defects or anomalies.
+
+Product category: {category}
+
+Here is the domain knowledge about known defect types for this product:
+{domain_knowledge}
+
+Use this domain knowledge along with your visual analysis to make your judgment.
+Pay close attention to the defect characteristics described in the domain knowledge.
+
+If the product looks perfect and normal, set "is_anomaly" to false.
+If there is ANY abnormality, set "is_anomaly" to true.
+
+Respond in JSON format ONLY:
+{{{{
+  "is_anomaly": true or false,
+  "report": {{{{
+    "anomaly_type": "type of defect or none",
+    "severity": "low/medium/high/none",
+    "location": "where the defect is or none",
+    "description": "detailed defect description or normal product",
+    "confidence": 0.0 to 1.0,
+    "recommendation": "action recommendation"
+  }}}},
+  "summary": {{{{
+    "summary": "one sentence inspection summary",
+    "risk_level": "low/medium/high/none"
+  }}}}
+}}}}'''
+
+
+def report_prompt_rag(
+    category: str,
+    domain_knowledge: str = "",
+) -> str:
+    """Build a RAG-augmented report generation prompt.
+
+    Args:
+        category: Product category string.
+        domain_knowledge: Formatted domain knowledge from retriever.format_context().
+
+    Returns:
+        Filled report prompt string.
+    """
+    return REPORT_PROMPT_RAG.format(
+        category=category,
+        domain_knowledge=domain_knowledge or "No relevant domain knowledge found.",
+    )
+
+
 def rag_prompt(
     ad_info: str = "",
     domain_knowledge: str = "",
