@@ -198,6 +198,39 @@ def compute_defect_location(anomaly_map: np.ndarray, threshold: float) -> Dict[s
     }
 
 
+def scale_defect_location(
+    defect_location: Dict[str, Any],
+    *,
+    from_size: Tuple[int, int],
+    to_size: Tuple[int, int],
+) -> Dict[str, Any]:
+    """Scale bbox coordinates from map size to original image size."""
+    if not defect_location.get("has_defect", False):
+        return defect_location
+
+    bbox = defect_location.get("bbox")
+    if not bbox or len(bbox) != 4:
+        return defect_location
+
+    from_h, from_w = int(from_size[0]), int(from_size[1])
+    to_h, to_w = int(to_size[0]), int(to_size[1])
+    if from_h <= 0 or from_w <= 0:
+        return defect_location
+
+    sx = float(to_w) / float(from_w)
+    sy = float(to_h) / float(from_h)
+
+    x0, y0, x1, y1 = bbox
+    scaled = dict(defect_location)
+    scaled["bbox"] = [
+        int(round(x0 * sx)),
+        int(round(y0 * sy)),
+        int(round(x1 * sx)),
+        int(round(y1 * sy)),
+    ]
+    return scaled
+
+
 def _clip01(value: float) -> float:
     return float(max(0.0, min(1.0, value)))
 
@@ -420,6 +453,8 @@ class PatchCoreCheckpointRunner:
         input_size: Tuple[int, int],
         allow_online_backbone: bool,
         sync_timing: bool,
+        postprocess_map: str,
+        use_amp: bool,
     ):
         self.checkpoint_dir = checkpoint_dir
         self.version = version
@@ -428,6 +463,8 @@ class PatchCoreCheckpointRunner:
         self.input_size = input_size
         self.allow_online_backbone = allow_online_backbone
         self.sync_timing = sync_timing
+        self.postprocess_map = postprocess_map
+        self.use_amp = bool(use_amp and self.device.type == "cuda")
 
         self._models: Dict[str, Any] = {}
         self._warmup_done: set[str] = set()
@@ -584,7 +621,11 @@ class PatchCoreCheckpointRunner:
         original_size = image.shape[:2]
 
         with torch.inference_mode():
-            outputs = model(input_tensor)
+            if self.use_amp:
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    outputs = model(input_tensor)
+            else:
+                outputs = model(input_tensor)
             if self.sync_timing and self.device.type == "cuda":
                 torch.cuda.synchronize()
 
@@ -593,8 +634,13 @@ class PatchCoreCheckpointRunner:
         pred_label = getattr(outputs, "pred_label", None)
 
         if anomaly_map is not None:
-            if anomaly_map.shape[-2:] != (original_size[0], original_size[1]):
-                anomaly_map = interpolate(anomaly_map, size=original_size, mode="bilinear", align_corners=False)
+            if self.postprocess_map == "original":
+                if anomaly_map.shape[-2:] != (original_size[0], original_size[1]):
+                    anomaly_map = interpolate(anomaly_map, size=original_size, mode="bilinear", align_corners=False)
+            else:
+                target_size = (self.input_size[0], self.input_size[1])
+                if anomaly_map.shape[-2:] != target_size:
+                    anomaly_map = interpolate(anomaly_map, size=target_size, mode="bilinear", align_corners=False)
             anomaly_map = anomaly_map[0, 0].detach().cpu().numpy()
 
         anomaly_score = float(pred_score[0].detach().cpu()) if pred_score is not None else float(np.max(anomaly_map))
@@ -621,6 +667,8 @@ class PatchCoreCheckpointRunner:
             "is_anomaly": is_anomaly,
             "threshold": threshold_used,
             "backend": "ckpt",
+            "original_size": [int(original_size[0]), int(original_size[1])],
+            "map_size": [int(anomaly_map.shape[0]), int(anomaly_map.shape[1])] if anomaly_map is not None else None,
         }
 
     def clear_cache(self) -> None:
@@ -700,10 +748,15 @@ def build_output_payload(
         return results
 
     return {
-        "schema_version": "ad_mllm_v1",
+        "schema_version": "ad_report_v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "backend": backend,
         "model_threshold": float(model_threshold),
+        "bbox_spec": {
+            "format": "xyxy",
+            "order": ["x_min", "y_min", "x_max", "y_max"],
+            "reference": "original_image_pixels",
+        },
         "policy": policy,
         "predictions": results,
     }
@@ -743,9 +796,21 @@ def build_result_dict(
     threshold = float(pred.get("threshold", 0.5))
     anomaly_map = pred.get("anomaly_map")
     model_is_anomaly = bool(pred["is_anomaly"])
+    original_size_list = pred.get("original_size")
+    map_size_list = pred.get("map_size")
+    original_size = tuple(original_size_list) if isinstance(original_size_list, list) and len(original_size_list) == 2 else None
+    map_size = tuple(map_size_list) if isinstance(map_size_list, list) and len(map_size_list) == 2 else None
 
     class_policy = resolve_class_policy(policy, dataset, category)
     decision, review_needed = decide_with_policy(anomaly_score, class_policy)
+    confidence = compute_confidence_level(anomaly_score, category)
+    confidence["reliability"] = class_policy["reliability"]
+    if class_policy["reliability"] == "low":
+        confidence["reliability_reason"] = "Policy marks this class as low reliability for AD-only judgement."
+    elif class_policy["reliability"] == "medium":
+        confidence["reliability_reason"] = "Policy marks this class as medium reliability; cross-check with visual cues."
+    else:
+        confidence["reliability_reason"] = "Policy marks this class as high reliability."
 
     default_location = {
         "has_defect": False,
@@ -765,6 +830,18 @@ def build_result_dict(
     else:
         defect_location_raw = default_location
 
+    if (
+        defect_location_raw.get("has_defect", False)
+        and original_size is not None
+        and map_size is not None
+        and tuple(original_size) != tuple(map_size)
+    ):
+        defect_location_raw = scale_defect_location(
+            defect_location_raw,
+            from_size=(int(map_size[0]), int(map_size[1])),
+            to_size=(int(original_size[0]), int(original_size[1])),
+        )
+
     location_confidence = compute_location_confidence(
         anomaly_score=anomaly_score,
         class_policy=class_policy,
@@ -779,26 +856,26 @@ def build_result_dict(
         defect_location=defect_location_raw,
         location_confidence=location_confidence,
     )
-    llm_guidance = build_llm_guidance(
+    report_guidance = build_llm_guidance(
         decision=decision,
         class_policy=class_policy,
         reason_codes=reason_codes,
         location_confidence=location_confidence,
     )
 
-    use_location_for_llm = (
+    use_location_for_report = (
         bool(class_policy["use_bbox"])
         and bool(defect_location_raw.get("has_defect", False))
         and location_confidence >= float(class_policy["min_location_confidence"])
     )
 
-    llm_location = defect_location_raw if use_location_for_llm else default_location
-    if use_location_for_llm:
-        llm_location = dict(defect_location_raw)
-        llm_location["location_confidence"] = location_confidence
+    report_location = defect_location_raw if use_location_for_report else default_location
+    if use_location_for_report:
+        report_location = dict(defect_location_raw)
+        report_location["location_confidence"] = location_confidence
     else:
-        llm_location = dict(default_location)
-        llm_location["location_confidence"] = location_confidence
+        report_location = dict(default_location)
+        report_location["location_confidence"] = location_confidence
 
     out: Dict[str, Any] = {
         "image_path": image_path,
@@ -819,18 +896,11 @@ def build_result_dict(
             "use_bbox": class_policy["use_bbox"],
             "min_location_confidence": class_policy["min_location_confidence"],
         },
-        "confidence": compute_confidence_level(anomaly_score, category),
+        "confidence": confidence,
         "defect_location_raw": defect_location_raw,
-        "defect_location_for_llm": llm_location,
-        "use_location_for_llm": use_location_for_llm,
-        "mcq_support": {
-            "q1_anomaly_decision": decision,
-            "q1_ad_weight": llm_guidance["ad_weight"],
-            "q3_location_available": use_location_for_llm,
-            "q3_region_hint": llm_location.get("region", "none") if use_location_for_llm else "none",
-            "q3_bbox_hint": llm_location.get("bbox") if use_location_for_llm else None,
-        },
-        "llm_guidance": llm_guidance,
+        "defect_location": report_location,
+        "use_location_for_report": use_location_for_report,
+        "report_guidance": report_guidance,
         "reason_codes": reason_codes,
     }
 
@@ -889,15 +959,15 @@ def main() -> None:
     parser.add_argument(
         "--output-format",
         type=str,
-        default="mllm",
-        choices=["mllm", "list"],
-        help="Output JSON format: mllm(recommended) or list(legacy)",
+        default="report",
+        choices=["report", "mllm", "list"],
+        help="Output JSON format: report(recommended), mllm(alias), or list(legacy)",
     )
     parser.add_argument(
         "--policy-json",
         type=str,
         default="configs/ad_policy.json",
-        help="Class policy JSON path for LLM-friendly AD decisioning",
+        help="Class policy JSON path for report-oriented AD decisioning",
     )
     parser.add_argument("--resume", action="store_true", help="Resume from existing output")
     parser.add_argument("--save-interval", type=int, default=200, help="Periodic save interval")
@@ -908,6 +978,14 @@ def main() -> None:
     parser.add_argument("--sync-timing", action="store_true", help="Synchronize CUDA per image (accurate timing, slower)")
     parser.add_argument("--gc-interval", type=int, default=0, help="Run gc.collect every N images (0=disabled)")
     parser.add_argument("--keep-model-cache", action="store_true", help="Keep loaded model cache across categories")
+    parser.add_argument(
+        "--postprocess-map",
+        type=str,
+        default="original",
+        choices=["original", "input"],
+        help="Anomaly-map postprocess scale: original(slower) or input(faster, bbox scaled to original)",
+    )
+    parser.add_argument("--amp", action="store_true", help="Enable CUDA mixed precision (faster on supported GPUs)")
 
     args = parser.parse_args()
 
@@ -931,6 +1009,8 @@ def main() -> None:
     print(f"Config: {args.config}")
     print(f"Output format: {args.output_format}")
     print(f"Policy: {policy_path if policy_path is not None else 'default (built-in)'}")
+    print(f"Postprocess map: {args.postprocess_map}")
+    print(f"AMP: {args.amp}")
     print(f"Version: v{config_version}" if config_version is not None else "Version: latest")
     print(f"Filters: datasets={config_datasets} categories={config_categories}")
     if args.backend == "ckpt":
@@ -951,6 +1031,8 @@ def main() -> None:
             input_size=input_size,
             allow_online_backbone=args.allow_online_backbone,
             sync_timing=args.sync_timing,
+            postprocess_map=args.postprocess_map,
+            use_amp=args.amp,
         )
     else:
         models_dir = Path(args.models_dir)
