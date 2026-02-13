@@ -31,7 +31,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -126,6 +126,17 @@ def _is_hub_error(exc: Exception) -> bool:
         "local cache",
     ]
     return any(k in msg for k in keys)
+
+
+def _is_oom_error(exc: Exception) -> bool:
+    return "out of memory" in str(exc).lower()
+
+
+def chunked(items: List[str], chunk_size: int) -> Iterator[List[str]]:
+    if chunk_size <= 0:
+        chunk_size = 1
+    for i in range(0, len(items), chunk_size):
+        yield items[i : i + chunk_size]
 
 
 def compute_confidence_level(anomaly_score: float, category: str) -> Dict[str, Any]:
@@ -465,6 +476,8 @@ class PatchCoreCheckpointRunner:
         self.sync_timing = sync_timing
         self.postprocess_map = postprocess_map
         self.use_amp = bool(use_amp and self.device.type == "cuda")
+        if self.device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
 
         self._models: Dict[str, Any] = {}
         self._warmup_done: set[str] = set()
@@ -593,14 +606,21 @@ class PatchCoreCheckpointRunner:
         self._models[key] = model
         return model
 
-    def _preprocess(self, image: np.ndarray) -> torch.Tensor:
+    def _preprocess_tensor(self, image: np.ndarray) -> torch.Tensor:
         h, w = self.input_size
         img = cv2.resize(image, (w, h))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(np.float32) / 255.0
         img = img.transpose(2, 0, 1)
-        tensor = torch.from_numpy(img).unsqueeze(0).float()
-        return tensor.to(self.device)
+        return torch.from_numpy(img)
+
+    def _preprocess(self, image: np.ndarray) -> torch.Tensor:
+        tensor = self._preprocess_tensor(image).unsqueeze(0).float()
+        return tensor.to(self.device, non_blocking=True)
+
+    def _preprocess_batch(self, images: List[np.ndarray]) -> torch.Tensor:
+        batch = torch.stack([self._preprocess_tensor(img) for img in images], dim=0).float()
+        return batch.to(self.device, non_blocking=True)
 
     def warmup_model(self, dataset: str, category: str) -> None:
         key = f"{dataset}/{category}"
@@ -616,9 +636,15 @@ class PatchCoreCheckpointRunner:
         self._warmup_done.add(key)
 
     def predict(self, dataset: str, category: str, image: np.ndarray) -> Dict[str, Any]:
+        return self.predict_batch(dataset, category, [image])[0]
+
+    def predict_batch(self, dataset: str, category: str, images: List[np.ndarray]) -> List[Dict[str, Any]]:
+        if not images:
+            return []
+
         model = self.get_model(dataset, category)
-        input_tensor = self._preprocess(image)
-        original_size = image.shape[:2]
+        input_tensor = self._preprocess_batch(images)
+        original_sizes = [img.shape[:2] for img in images]
 
         with torch.inference_mode():
             if self.use_amp:
@@ -634,17 +660,10 @@ class PatchCoreCheckpointRunner:
         pred_label = getattr(outputs, "pred_label", None)
 
         if anomaly_map is not None:
-            if self.postprocess_map == "original":
-                if anomaly_map.shape[-2:] != (original_size[0], original_size[1]):
-                    anomaly_map = interpolate(anomaly_map, size=original_size, mode="bilinear", align_corners=False)
-            else:
+            if self.postprocess_map == "input":
                 target_size = (self.input_size[0], self.input_size[1])
                 if anomaly_map.shape[-2:] != target_size:
                     anomaly_map = interpolate(anomaly_map, size=target_size, mode="bilinear", align_corners=False)
-            anomaly_map = anomaly_map[0, 0].detach().cpu().numpy()
-
-        anomaly_score = float(pred_score[0].detach().cpu()) if pred_score is not None else float(np.max(anomaly_map))
-        is_anomaly = bool(pred_label[0].detach().cpu()) if pred_label is not None else (anomaly_score > self.threshold)
 
         threshold_used = self.threshold
         post = getattr(model, "post_processor", None)
@@ -655,21 +674,52 @@ class PatchCoreCheckpointRunner:
             else:
                 threshold_used = float(thr)
 
+        scores = pred_score.detach().flatten().cpu().tolist() if pred_score is not None else None
+        labels = pred_label.detach().flatten().cpu().tolist() if pred_label is not None else None
+
+        results: List[Dict[str, Any]] = []
+        for idx, original_size in enumerate(original_sizes):
+            anomaly_map_np: Optional[np.ndarray] = None
+            if anomaly_map is not None:
+                map_i = anomaly_map[idx : idx + 1]
+                if self.postprocess_map == "original":
+                    if map_i.shape[-2:] != (original_size[0], original_size[1]):
+                        map_i = interpolate(map_i, size=original_size, mode="bilinear", align_corners=False)
+                anomaly_map_np = map_i[0, 0].detach().cpu().numpy()
+
+            if scores is not None:
+                anomaly_score = float(scores[idx])
+            elif anomaly_map_np is not None:
+                anomaly_score = float(np.max(anomaly_map_np))
+            else:
+                anomaly_score = 0.0
+
+            if labels is not None:
+                is_anomaly = bool(labels[idx])
+            else:
+                is_anomaly = anomaly_score > self.threshold
+
+            results.append(
+                {
+                    "anomaly_score": anomaly_score,
+                    "anomaly_map": anomaly_map_np,
+                    "is_anomaly": is_anomaly,
+                    "threshold": threshold_used,
+                    "backend": "ckpt",
+                    "original_size": [int(original_size[0]), int(original_size[1])],
+                    "map_size": [int(anomaly_map_np.shape[0]), int(anomaly_map_np.shape[1])]
+                    if anomaly_map_np is not None
+                    else None,
+                }
+            )
+
         del input_tensor, outputs
         if pred_score is not None:
             del pred_score
         if pred_label is not None:
             del pred_label
 
-        return {
-            "anomaly_score": anomaly_score,
-            "anomaly_map": anomaly_map,
-            "is_anomaly": is_anomaly,
-            "threshold": threshold_used,
-            "backend": "ckpt",
-            "original_size": [int(original_size[0]), int(original_size[1])],
-            "map_size": [int(anomaly_map.shape[0]), int(anomaly_map.shape[1])] if anomaly_map is not None else None,
-        }
+        return results
 
     def clear_cache(self) -> None:
         self._models.clear()
@@ -699,6 +749,9 @@ class PatchCoreOnnxRunner:
             "threshold": float(result.threshold),
             "backend": "onnx",
         }
+
+    def predict_batch(self, dataset: str, category: str, images: List[np.ndarray]) -> List[Dict[str, Any]]:
+        return [self.predict(dataset, category, image) for image in images]
 
     def clear_cache(self) -> None:
         self.manager.clear_cache()
@@ -955,6 +1008,7 @@ def main() -> None:
     parser.add_argument("--data-root", type=str, required=True, help="Root directory containing images")
     parser.add_argument("--mmad-json", type=str, required=True, help="Path to mmad.json")
     parser.add_argument("--max-images", type=int, default=None, help="Maximum images to process")
+    parser.add_argument("--batch-size", type=int, default=8, help="Inference batch size per category")
     parser.add_argument("--output", type=str, default="output/ad_predictions.json", help="Output JSON path")
     parser.add_argument(
         "--output-format",
@@ -977,15 +1031,18 @@ def main() -> None:
     parser.add_argument("--allow-online-backbone", action="store_true", help="Allow online backbone resolution when checkpoint loading fails")
     parser.add_argument("--sync-timing", action="store_true", help="Synchronize CUDA per image (accurate timing, slower)")
     parser.add_argument("--gc-interval", type=int, default=0, help="Run gc.collect every N images (0=disabled)")
-    parser.add_argument("--keep-model-cache", action="store_true", help="Keep loaded model cache across categories")
+    parser.add_argument("--keep-model-cache", action="store_true", dest="keep_model_cache", help="Keep loaded model cache across categories")
+    parser.add_argument("--no-keep-model-cache", action="store_false", dest="keep_model_cache", help="Clear model cache after each category")
     parser.add_argument(
         "--postprocess-map",
         type=str,
-        default="original",
+        default="input",
         choices=["original", "input"],
         help="Anomaly-map postprocess scale: original(slower) or input(faster, bbox scaled to original)",
     )
-    parser.add_argument("--amp", action="store_true", help="Enable CUDA mixed precision (faster on supported GPUs)")
+    parser.add_argument("--amp", action="store_true", dest="amp", help="Enable CUDA mixed precision")
+    parser.add_argument("--no-amp", action="store_false", dest="amp", help="Disable CUDA mixed precision")
+    parser.set_defaults(amp=True, keep_model_cache=True)
 
     args = parser.parse_args()
 
@@ -1009,8 +1066,10 @@ def main() -> None:
     print(f"Config: {args.config}")
     print(f"Output format: {args.output_format}")
     print(f"Policy: {policy_path if policy_path is not None else 'default (built-in)'}")
+    print(f"Batch size: {args.batch_size}")
     print(f"Postprocess map: {args.postprocess_map}")
     print(f"AMP: {args.amp}")
+    print(f"Keep model cache: {args.keep_model_cache}")
     print(f"Version: v{config_version}" if config_version is not None else "Version: latest")
     print(f"Filters: datasets={config_datasets} categories={config_categories}")
     if args.backend == "ckpt":
@@ -1043,6 +1102,8 @@ def main() -> None:
 
     runtime_device = str(runner.device) if hasattr(runner, "device") else args.device
     print(f"Device: {runtime_device}")
+    if args.device == "cuda" and runtime_device == "cpu":
+        print("Warning: CUDA requested but not available; running on CPU (much slower).")
     print()
 
     print(f"Loading MMAD data from: {mmad_json}")
@@ -1099,54 +1160,92 @@ def main() -> None:
             continue
 
         cat_start = time.perf_counter()
-        pbar = tqdm(cat_images, desc=f"  {cat_key}", ncols=100, leave=False)
+        pbar = tqdm(total=len(cat_images), desc=f"  {cat_key}", ncols=100, leave=False)
 
-        for image_path in pbar:
-            image_full_path = data_root / image_path
-            if not image_full_path.exists():
-                errors += 1
-                continue
-
-            try:
+        for batch_paths in chunked(cat_images, max(1, int(args.batch_size))):
+            batch_images: List[np.ndarray] = []
+            valid_paths: List[str] = []
+            for image_path in batch_paths:
+                image_full_path = data_root / image_path
+                if not image_full_path.exists():
+                    errors += 1
+                    continue
                 image = cv2.imread(str(image_full_path))
                 if image is None:
                     errors += 1
                     continue
+                batch_images.append(image)
+                valid_paths.append(image_path)
 
+            if not batch_images:
+                pbar.update(len(batch_paths))
+                pbar.set_postfix({"done": processed, "err": errors})
+                continue
+
+            try:
                 t0 = time.perf_counter()
-                pred = runner.predict(dataset, category, image)
+                preds = runner.predict_batch(dataset, category, batch_images)
                 infer_time = time.perf_counter() - t0
                 total_inference_time += infer_time
-
-                result_dict = build_result_dict(
-                    image_path,
-                    dataset,
-                    category,
-                    pred,
-                    policy=policy,
-                    include_map_stats=include_map_stats,
-                )
-                results.append(result_dict)
-                processed += 1
-
-                if args.gc_interval > 0 and processed % args.gc_interval == 0:
-                    gc.collect()
+            except RuntimeError as exc:
+                if _is_oom_error(exc) and len(batch_images) > 1:
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
-
-                if args.save_interval > 0 and processed % args.save_interval == 0:
-                    save_results(
-                        output_path,
-                        results,
-                        output_format=args.output_format,
-                        policy=policy,
-                        backend=args.backend,
-                        model_threshold=args.threshold,
-                    )
-
+                    preds: List[Optional[Dict[str, Any]]] = []
+                    for single_img in batch_images:
+                        try:
+                            t0 = time.perf_counter()
+                            pred = runner.predict(dataset, category, single_img)
+                            infer_time = time.perf_counter() - t0
+                            total_inference_time += infer_time
+                            preds.append(pred)
+                        except Exception:
+                            preds.append(None)
+                else:
+                    errors += len(valid_paths)
+                    pbar.update(len(batch_paths))
+                    pbar.set_postfix({"done": processed, "err": errors})
+                    continue
             except Exception:
-                errors += 1
+                errors += len(valid_paths)
+                pbar.update(len(batch_paths))
+                pbar.set_postfix({"done": processed, "err": errors})
+                continue
 
+            for image_path, pred in zip(valid_paths, preds):
+                if pred is None:
+                    errors += 1
+                    continue
+                try:
+                    result_dict = build_result_dict(
+                        image_path,
+                        dataset,
+                        category,
+                        pred,
+                        policy=policy,
+                        include_map_stats=include_map_stats,
+                    )
+                    results.append(result_dict)
+                    processed += 1
+
+                    if args.gc_interval > 0 and processed % args.gc_interval == 0:
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+
+                    if args.save_interval > 0 and processed % args.save_interval == 0:
+                        save_results(
+                            output_path,
+                            results,
+                            output_format=args.output_format,
+                            policy=policy,
+                            backend=args.backend,
+                            model_threshold=args.threshold,
+                        )
+                except Exception:
+                    errors += 1
+
+            pbar.update(len(batch_paths))
             pbar.set_postfix({"done": processed, "err": errors})
 
         pbar.close()
