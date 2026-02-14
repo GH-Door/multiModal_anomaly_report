@@ -845,12 +845,12 @@ def build_output_payload(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "backend": backend,
         "model_threshold": float(model_threshold),
+        "decision_rules_version": str(policy.get("schema_version", "ad_policy_v1")),
         "bbox_spec": {
             "format": "xyxy",
             "order": ["x_min", "y_min", "x_max", "y_max"],
             "reference": "original_image_pixels",
         },
-        "policy": policy,
         "predictions": results,
     }
 
@@ -980,15 +980,7 @@ def build_result_dict(
         "model_threshold": threshold,
         "decision": decision,
         "review_needed": review_needed,
-        "policy": {
-            "class_key": class_policy["class_key"],
-            "t_low": class_policy["t_low"],
-            "t_high": class_policy["t_high"],
-            "reliability": class_policy["reliability"],
-            "ad_weight": class_policy["ad_weight"],
-            "use_bbox": class_policy["use_bbox"],
-            "min_location_confidence": class_policy["min_location_confidence"],
-        },
+        "class_key": class_policy["class_key"],
         "confidence": confidence,
         "defect_location_raw": defect_location_raw,
         "defect_location": report_location,
@@ -1063,7 +1055,7 @@ def main() -> None:
         "--policy-json",
         type=str,
         default="configs/ad_policy.json",
-        help="Class policy JSON path for report-oriented AD decisioning",
+        help="Decision-rules JSON path (internal only; not exported in output JSON)",
     )
     parser.add_argument("--resume", action="store_true", help="Resume from existing output")
     parser.add_argument("--save-interval", type=int, default=0, help="Periodic save interval (0=save only at end)")
@@ -1108,7 +1100,7 @@ def main() -> None:
     print(f"Backend: {args.backend}")
     print(f"Config: {args.config}")
     print(f"Output format: {args.output_format}")
-    print(f"Policy: {policy_path if policy_path is not None else 'default (built-in)'}")
+    print(f"Decision rules: {policy_path if policy_path is not None else 'default (built-in)'}")
     print(f"Batch size: {args.batch_size}")
     print(f"IO workers: {args.io_workers}")
     print(f"Decode reduced: x{args.decode_reduced}")
