@@ -41,6 +41,7 @@ if str(PROJ_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJ_ROOT))
 
 from src.config.experiment import ExperimentConfig, load_experiment_config
+from src.ad import load_ad_predictions_file, normalize_image_key, to_llm_ad_info
 from src.mllm.factory import MODEL_REGISTRY, get_llm_client, list_llm_models
 from src.mllm.base import format_ad_info
 from src.eval.metrics import calculate_accuracy_mmad
@@ -85,30 +86,15 @@ def load_mmad_data(json_path: str) -> dict:
 
 
 def load_ad_predictions(ad_output_path: str) -> dict:
-    """Load AD predictions JSON and index by image path."""
-    with open(ad_output_path, "r", encoding="utf-8") as f:
-        predictions = json.load(f)
-
-    if isinstance(predictions, list):
-        indexed = {}
-        for p in predictions:
-            img_key = p.get("image_path") or p.get("image") or p.get("img_path") or p.get("path")
-            if img_key:
-                img_key = img_key.lstrip("./")
-                indexed[img_key] = p
-        return indexed
-    elif isinstance(predictions, dict):
-        if "predictions" in predictions:
-            return load_ad_predictions(predictions["predictions"])
-        return predictions
-    return predictions
+    """Load AD predictions JSON and index by normalized image path."""
+    return load_ad_predictions_file(ad_output_path)
 
 
 def run_ad_inference(cfg: ExperimentConfig, data_root: str, mmad_json: str) -> str:
-    """Run AD model inference using run_ad_inference_ckpt.py.
+    """Run AD model inference using run_ad_inference.py.
 
     If cfg.ad_output already points to an existing file, skip inference.
-    Otherwise run scripts/run_ad_inference_ckpt.py via subprocess.
+    Otherwise run scripts/run_ad_inference.py via subprocess.
     """
     # ad.output를 명시적으로 지정한 경우에만 스킵 (사용자가 의도적으로 재사용)
     if cfg.ad_output and Path(cfg.ad_output).exists():
@@ -121,7 +107,7 @@ def run_ad_inference(cfg: ExperimentConfig, data_root: str, mmad_json: str) -> s
     ad_output = str(output_dir / f"{cfg.ad_model}_predictions.json")
 
     # Find inference script
-    inference_script = str(PROJ_ROOT / "scripts" / "run_ad_inference_ckpt.py")
+    inference_script = str(PROJ_ROOT / "scripts" / "run_ad_inference.py")
     if not Path(inference_script).exists():
         print(f"Error: inference script not found: {inference_script}")
         sys.exit(1)
@@ -135,18 +121,20 @@ def run_ad_inference(cfg: ExperimentConfig, data_root: str, mmad_json: str) -> s
     # Build command
     cmd = [
         sys.executable, inference_script,
+        "--backend", "ckpt",
         "--checkpoint-dir", checkpoint_dir,
         "--data-root", data_root,
         "--mmad-json", mmad_json,
         "--output", ad_output,
+        "--output-format", "report",
     ]
 
     ad_config = cfg.ad_config or "configs/anomaly.yaml"
     if Path(ad_config).exists():
         cmd.extend(["--config", ad_config])
 
-    if cfg.ad_thresholds is not None:
-        cmd.extend(["--threshold", str(cfg.ad_thresholds)])
+    if cfg.ad_threshold is not None:
+        cmd.extend(["--threshold", str(cfg.ad_threshold)])
 
     if cfg.ad_version is not None:
         cmd.extend(["--version", str(cfg.ad_version)])
@@ -156,7 +144,7 @@ def run_ad_inference(cfg: ExperimentConfig, data_root: str, mmad_json: str) -> s
 
     version_str = f"v{cfg.ad_version}" if cfg.ad_version is not None else "latest"
     print("=" * 60)
-    print("Running AD Model Inference (ckpt)")
+    print("Running AD Model Inference")
     print("=" * 60)
     print(f"Script:       {inference_script}")
     print(f"Config:       {ad_config}")
@@ -349,9 +337,10 @@ def run_experiment(cfg: ExperimentConfig) -> Path:
         # Get AD prediction for this image
         ad_info = None
         if ad_predictions is not None:
-            ad_info = ad_predictions.get(image_rel)
-            if ad_info is None:
-                ad_info = ad_predictions.get(image_rel.replace("\\", "/"))
+            image_key = normalize_image_key(image_rel)
+            ad_raw = ad_predictions.get(image_key)
+            if ad_raw is not None:
+                ad_info = to_llm_ad_info(ad_raw)
 
         # Build RAG instruction if enabled
         instruction = None
@@ -549,6 +538,10 @@ def main():
 
     # 모델별 기본값 적용 (CLI로 명시하지 않은 경우)
     _BATCH_MODE_DEFAULTS = {
+        "internvl": True,
+        "internvl3.5-8b": True,
+        "internvl2.5-8b": True,
+        "internvl-8b": True,
         "llava": False,
         "llava-onevision": False,
     }

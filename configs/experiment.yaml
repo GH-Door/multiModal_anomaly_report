@@ -26,7 +26,7 @@ rag:
 
 # AD model inference settings (ad_model이 null이 아닐 때 사용)
 ad:
-  config: configs/anomaly.yaml                     # run_ad_inference_ckpt.py 설정 파일
+  config: configs/anomaly.yaml                     # run_ad_inference.py 설정 파일
   output: null                                     # 기존 예측 JSON (있으면 inference 스킵)
   threshold: 0.5                                   # anomaly threshold
   checkpoint_dir: /content/drive/Othercomputers/mynotebook/multimodal-anomaly-report-generation/dataset/MMAD/checkpoints/patchcore_anomalib  # {dir}/Patchcore/{dataset}/{category}/v{N}/model.ckpt

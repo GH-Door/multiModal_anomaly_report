@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import os
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -15,6 +16,11 @@ from .base import BaseLLMClient, INSTRUCTION, INSTRUCTION_WITH_AD, format_ad_inf
 from src.utils.device import get_device
 
 logger = logging.getLogger(__name__)
+
+# Keep third-party logs quieter in notebook/runtime environments.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 
 @contextlib.contextmanager
@@ -208,6 +214,9 @@ class InternVLClient(BaseLLMClient):
             return
 
         from transformers import AutoModel, AutoTokenizer
+        from transformers.utils import logging as hf_logging
+
+        hf_logging.set_verbosity_error()
 
         # Loading InternVL model
 
@@ -240,6 +249,16 @@ class InternVLClient(BaseLLMClient):
             trust_remote_code=True,
             use_fast=False
         )
+        if self._tokenizer.pad_token_id is None and self._tokenizer.eos_token_id is not None:
+            self._tokenizer.pad_token_id = self._tokenizer.eos_token_id
+
+        try:
+            eos_id = self._tokenizer.eos_token_id
+            if eos_id is not None:
+                self._model.generation_config.pad_token_id = eos_id
+                self._model.generation_config.eos_token_id = eos_id
+        except Exception:
+            pass
 
         # Model loaded
 
@@ -303,7 +322,12 @@ class InternVLClient(BaseLLMClient):
         num_patches_list = [img.shape[0] for img in images]
 
         # Generate
-        generation_config = dict(max_new_tokens=self.max_new_tokens, do_sample=False)
+        generation_config = dict(
+            max_new_tokens=self.max_new_tokens,
+            do_sample=False,
+            pad_token_id=self._tokenizer.eos_token_id,
+            eos_token_id=self._tokenizer.eos_token_id,
+        )
 
         response, _ = self._model.chat(
             self._tokenizer,
@@ -374,7 +398,12 @@ class InternVLClient(BaseLLMClient):
         predicted_answers = []
         history = None
 
-        generation_config = dict(max_new_tokens=self.max_new_tokens, do_sample=False)
+        generation_config = dict(
+            max_new_tokens=self.max_new_tokens,
+            do_sample=False,
+            pad_token_id=self._tokenizer.eos_token_id,
+            eos_token_id=self._tokenizer.eos_token_id,
+        )
 
         for i in range(len(questions)):
             part_questions = questions[i:i + 1]
@@ -454,7 +483,12 @@ class InternVLClient(BaseLLMClient):
         for q in questions:
             prompt += q["text"] + "\n"
 
-        generation_config = dict(max_new_tokens=self.max_new_tokens * len(questions), do_sample=False)
+        generation_config = dict(
+            max_new_tokens=self.max_new_tokens * len(questions),
+            do_sample=False,
+            pad_token_id=self._tokenizer.eos_token_id,
+            eos_token_id=self._tokenizer.eos_token_id,
+        )
 
         # Single model call for all questions
         response, _ = self._model.chat(
