@@ -84,6 +84,7 @@ class GeminiClient(BaseLLMClient):
         few_shot_paths: List[str],
         questions: List[Dict[str, str]],
         ad_info: Optional[Dict] = None,
+        instruction: Optional[str] = None,
     ) -> dict:
         """Build Gemini API payload following paper's format."""
 
@@ -155,6 +156,7 @@ class GeminiClient(BaseLLMClient):
         meta: dict,
         few_shot_paths: List[str],
         ad_info: Optional[Dict] = None,
+        instruction: Optional[str] = None,
     ) -> Tuple[List[Dict], List[str], Optional[List[str]], List[str]]:
         """Generate answers following paper's Gemini approach.
 

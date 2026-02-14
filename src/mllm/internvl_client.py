@@ -249,13 +249,15 @@ class InternVLClient(BaseLLMClient):
         few_shot_paths: List[str],
         questions: List[Dict[str, str]],
         ad_info: Optional[Dict] = None,
+        instruction: Optional[str] = None,
     ) -> dict:
         """Build InternVL message format."""
-        # Select instruction based on AD info availability
-        if ad_info:
-            instruction = INSTRUCTION_WITH_AD.format(ad_info=format_ad_info(ad_info))
-        else:
-            instruction = INSTRUCTION
+        # Select instruction: custom > AD > default
+        if instruction is None:
+            if ad_info:
+                instruction = INSTRUCTION_WITH_AD.format(ad_info=format_ad_info(ad_info))
+            else:
+                instruction = INSTRUCTION
 
         # Build text prompt with image placeholders
         prompt = instruction + "\n"
@@ -325,6 +327,7 @@ class InternVLClient(BaseLLMClient):
         meta: dict,
         few_shot_paths: List[str],
         ad_info: Optional[Dict] = None,
+        instruction: Optional[str] = None,
     ) -> Tuple[List[Dict], List[str], Optional[List[str]], List[str]]:
         """Generate answers with conversation history (InternVL's approach)."""
         questions, answers, question_types = self.parse_conversation(meta)
@@ -352,11 +355,12 @@ class InternVLClient(BaseLLMClient):
         pixel_values = torch.cat(images, dim=0)
         num_patches_list = [img.shape[0] for img in images]
 
-        # Select instruction based on AD info availability
-        if ad_info:
-            instruction = INSTRUCTION_WITH_AD.format(ad_info=format_ad_info(ad_info))
-        else:
-            instruction = INSTRUCTION
+        # Select instruction: custom > AD > default
+        if instruction is None:
+            if ad_info:
+                instruction = INSTRUCTION_WITH_AD.format(ad_info=format_ad_info(ad_info))
+            else:
+                instruction = INSTRUCTION
 
         # Build base prompt
         base_prompt = instruction + "\n"
@@ -402,6 +406,7 @@ class InternVLClient(BaseLLMClient):
         meta: dict,
         few_shot_paths: List[str],
         ad_info: Optional[Dict] = None,
+        instruction: Optional[str] = None,
     ) -> Tuple[List[Dict], List[str], Optional[List[str]], List[str]]:
         """Generate answers for ALL questions in a single model call (5-8x faster)."""
         questions, answers, question_types = self.parse_conversation(meta)
@@ -429,11 +434,12 @@ class InternVLClient(BaseLLMClient):
         pixel_values = torch.cat(images, dim=0)
         num_patches_list = [img.shape[0] for img in images]
 
-        # Select instruction based on AD info availability
-        if ad_info:
-            instruction = INSTRUCTION_WITH_AD.format(ad_info=format_ad_info(ad_info))
-        else:
-            instruction = INSTRUCTION
+        # Select instruction: custom > AD > default
+        if instruction is None:
+            if ad_info:
+                instruction = INSTRUCTION_WITH_AD.format(ad_info=format_ad_info(ad_info))
+            else:
+                instruction = INSTRUCTION
 
         # Build prompt with ALL questions
         prompt = instruction + "\n"

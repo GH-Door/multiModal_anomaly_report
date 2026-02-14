@@ -75,6 +75,7 @@ class ClaudeClient(BaseLLMClient):
         few_shot_paths: List[str],
         questions: List[Dict[str, str]],
         ad_info: Optional[Dict] = None,
+        instruction: Optional[str] = None,
     ) -> dict:
         """Build Anthropic API payload following MMAD protocol."""
 

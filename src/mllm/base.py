@@ -291,6 +291,7 @@ class BaseLLMClient(ABC):
         few_shot_paths: List[str],
         questions: List[Dict[str, str]],
         ad_info: Optional[Dict] = None,
+        instruction: Optional[str] = None,
     ) -> dict:
         """Build API payload. Must be implemented by subclass.
 
@@ -299,6 +300,7 @@ class BaseLLMClient(ABC):
             few_shot_paths: List of few-shot template image paths
             questions: List of question dictionaries
             ad_info: Optional anomaly detection model output dictionary
+            instruction: Optional custom instruction (e.g. RAG prompt) to override default
         """
         pass
 
@@ -308,6 +310,7 @@ class BaseLLMClient(ABC):
         meta: dict,
         few_shot_paths: List[str],
         ad_info: Optional[Dict] = None,
+        instruction: Optional[str] = None,
     ) -> Tuple[List[Dict], List[str], Optional[List[str]], List[str]]:
         """Generate answers for all questions in the conversation.
 
@@ -318,6 +321,7 @@ class BaseLLMClient(ABC):
             meta: MMAD metadata dictionary
             few_shot_paths: List of few-shot template image paths
             ad_info: Optional anomaly detection model output dictionary
+            instruction: Optional custom instruction (e.g. RAG prompt)
 
         Returns:
             questions: Parsed questions
@@ -335,7 +339,7 @@ class BaseLLMClient(ABC):
         # Paper's approach: ask incrementally (1 question, then 2, then 3...)
         for i in range(len(questions)):
             part_questions = questions[:i + 1]
-            payload = self.build_payload(query_image_path, few_shot_paths, part_questions, ad_info=ad_info)
+            payload = self.build_payload(query_image_path, few_shot_paths, part_questions, ad_info=ad_info, instruction=instruction)
 
             response = self.send_request(payload)
             if response is None:
@@ -358,6 +362,7 @@ class BaseLLMClient(ABC):
         meta: dict,
         few_shot_paths: List[str],
         ad_info: Optional[Dict] = None,
+        instruction: Optional[str] = None,
     ) -> Tuple[List[Dict], List[str], Optional[List[str]], List[str]]:
         """Generate answers for all questions in a single API call.
 
@@ -368,6 +373,7 @@ class BaseLLMClient(ABC):
             meta: MMAD metadata dictionary
             few_shot_paths: List of few-shot template image paths
             ad_info: Optional anomaly detection model output dictionary
+            instruction: Optional custom instruction (e.g. RAG prompt)
 
         Returns:
             questions: Parsed questions
@@ -380,7 +386,7 @@ class BaseLLMClient(ABC):
         if not questions or not answers:
             return questions, answers, None, question_types
 
-        payload = self.build_payload(query_image_path, few_shot_paths, questions, ad_info=ad_info)
+        payload = self.build_payload(query_image_path, few_shot_paths, questions, ad_info=ad_info, instruction=instruction)
         response = self.send_request(payload)
 
         if response is None:
