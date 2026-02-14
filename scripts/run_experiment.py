@@ -486,6 +486,10 @@ def main():
 
     # 모델별 기본값 적용 (CLI로 명시하지 않은 경우)
     _BATCH_MODE_DEFAULTS = {
+        "internvl": True,
+        "internvl3.5-8b": True,
+        "internvl2.5-8b": True,
+        "internvl-8b": True,
         "llava": False,
         "llava-onevision": False,
     }
