@@ -20,6 +20,12 @@ import sys
 import time
 from pathlib import Path
 
+# 프로젝트 루트를 sys.path에 추가 (어디서 실행해도 src 모듈 import 가능)
+SCRIPT_PATH = Path(__file__).resolve()
+PROJ_ROOT = SCRIPT_PATH.parents[1]
+if str(PROJ_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJ_ROOT))
+
 import torch
 from anomalib.models import Patchcore, WinClip, EfficientAd
 from anomalib.models.image.efficient_ad.torch_model import EfficientAdModelSize
@@ -541,7 +547,7 @@ class Anomalibs:
             model.model.num_neighbors = pt_data.get("n_neighbors", 9)
         elif ckpt_path is not None:
             get_inference_logger().info(f"Loading checkpoint: {ckpt_path}")
-            model = model.__class__.load_from_checkpoint(str(ckpt_path))
+            model = model.__class__.load_from_checkpoint(str(ckpt_path), weights_only=False)
 
         # WinCLIP requires class name for text embeddings
         if self.model_name == "winclip":
@@ -612,6 +618,9 @@ class Anomalibs:
         self.last_inference_time = inference_time
         self.last_n_images = n_images
 
+        # Compute and print metrics
+        self._print_metrics(all_predictions, dataset, category)
+
         # save json
         if save_json is None:
             save_json = self.output_config.get("save_json", False)
@@ -619,6 +628,79 @@ class Anomalibs:
             self.save_predictions_json(all_predictions, dataset, category)
 
         return all_predictions
+
+    def _print_metrics(self, predictions: list, dataset: str, category: str):
+        """Compute and print evaluation metrics."""
+        import numpy as np
+        from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score
+        from src.eval.metrics import compute_pro
+
+        # Collect predictions
+        y_true = []
+        y_score = []
+        y_pred = []
+        gt_masks = []
+        anomaly_maps = []
+
+        for batch in predictions:
+            if batch.gt_label is not None and batch.pred_score is not None:
+                y_true.extend(batch.gt_label.numpy().tolist())
+                y_score.extend(batch.pred_score.numpy().tolist())
+                # pred_label: anomalib이 학습 시 최적화한 threshold 적용 결과
+                if batch.pred_label is not None:
+                    y_pred.extend(batch.pred_label.numpy().tolist())
+                else:
+                    y_pred.extend((batch.pred_score.numpy() > 0.5).astype(int).tolist())
+            if batch.gt_mask is not None and batch.anomaly_map is not None:
+                gt_masks.append(batch.gt_mask.numpy())
+                anomaly_maps.append(batch.anomaly_map.numpy())
+
+        if not y_true or len(set(y_true)) < 2:
+            print(f"  [SKIP] Not enough labels for metrics (got {len(set(y_true))} classes)")
+            return
+
+        y_true = np.array(y_true)
+        y_score = np.array(y_score)
+        y_pred = np.array(y_pred)
+
+        # Compute image-level metrics
+        auroc = roc_auc_score(y_true, y_score)
+        f1 = f1_score(y_true, y_pred, zero_division=0)
+        precision = precision_score(y_true, y_pred, zero_division=0)
+        recall = recall_score(y_true, y_pred, zero_division=0)
+
+        # Compute PRO (pixel-level)
+        pro = None
+        if gt_masks and anomaly_maps:
+            gt_masks_np = np.concatenate(gt_masks, axis=0)
+            anomaly_maps_np = np.concatenate(anomaly_maps, axis=0)
+            # Ensure 3D shape (N, H, W)
+            if gt_masks_np.ndim == 4:
+                gt_masks_np = gt_masks_np.squeeze(1)
+            if anomaly_maps_np.ndim == 4:
+                anomaly_maps_np = anomaly_maps_np.squeeze(1)
+            # Only compute PRO for anomaly samples (where gt_mask has defects)
+            has_defect = gt_masks_np.sum(axis=(1, 2)) > 0
+            if has_defect.sum() > 0:
+                pro = compute_pro(gt_masks_np[has_defect], anomaly_maps_np[has_defect], num_thresholds=50)
+
+        # Compute per-class accuracy
+        n_normal = sum(y_true == 0)
+        n_anomaly = sum(y_true == 1)
+        normal_correct = sum((y_true == 0) & (y_pred == 0))  # True Negatives
+        anomaly_correct = sum((y_true == 1) & (y_pred == 1))  # True Positives
+
+        # Print results
+        print(f"\n  === {dataset}/{category} Metrics ===")
+        print(f"  Samples: {len(y_true)} (Normal: {n_normal}, Anomaly: {n_anomaly})")
+        print(f"  Normal correct:  {normal_correct}/{n_normal} ({normal_correct/n_normal*100:.1f}%)" if n_normal > 0 else "  Normal correct:  N/A")
+        print(f"  Anomaly correct: {anomaly_correct}/{n_anomaly} ({anomaly_correct/n_anomaly*100:.1f}%)" if n_anomaly > 0 else "  Anomaly correct: N/A")
+        print(f"  Image AUROC: {auroc:.4f}")
+        print(f"  F1 Score:    {f1:.4f}")
+        print(f"  Precision:   {precision:.4f}")
+        print(f"  Recall:      {recall:.4f}")
+        if pro is not None:
+            print(f"  PRO:         {pro:.4f}")
 
     def get_mask_path(self, image_path: str, dataset: str) -> str | None:
         """이미지 경로에서 대응하는 마스크 경로 추론"""
@@ -770,28 +852,76 @@ class Anomalibs:
         get_train_logger().info(f"fit_all completed: {total} categories")
 
     def predict_all(self, save_json: bool = None):
+        import numpy as np
+        from sklearn.metrics import roc_auc_score
+        from src.eval.metrics import compute_pro
+
         categories = self.get_trained_categories()
         total = len(categories)
         get_inference_logger().info(f"predict_all: {total} trained categories")
 
         all_predictions = {}
+        summary_results = []
+
         for idx, (dataset, category) in enumerate(categories, 1):
             print(f"\n[{idx}/{total}] Predicting: {dataset}/{category}...")
             self.last_inference_time = 0.0
             self.last_n_images = 0
-            start = time.time()
             key = f"{dataset}/{category}"
-            all_predictions[key] = self.predict(dataset, category, save_json)
-            elapsed = time.time() - start
+            predictions = self.predict(dataset, category, save_json)
+            all_predictions[key] = predictions
+
+            # Collect metrics for summary
+            y_true, y_score = [], []
+            gt_masks, anomaly_maps = [], []
+            for batch in predictions:
+                if batch.gt_label is not None and batch.pred_score is not None:
+                    y_true.extend(batch.gt_label.numpy().tolist())
+                    y_score.extend(batch.pred_score.numpy().tolist())
+                if batch.gt_mask is not None and batch.anomaly_map is not None:
+                    gt_masks.append(batch.gt_mask.numpy())
+                    anomaly_maps.append(batch.anomaly_map.numpy())
+
+            if y_true and len(set(y_true)) >= 2:
+                auroc = roc_auc_score(np.array(y_true), np.array(y_score))
+                pro = None
+                if gt_masks and anomaly_maps:
+                    gt_masks_np = np.concatenate(gt_masks, axis=0)
+                    anomaly_maps_np = np.concatenate(anomaly_maps, axis=0)
+                    if gt_masks_np.ndim == 4:
+                        gt_masks_np = gt_masks_np.squeeze(1)
+                    if anomaly_maps_np.ndim == 4:
+                        anomaly_maps_np = anomaly_maps_np.squeeze(1)
+                    has_defect = gt_masks_np.sum(axis=(1, 2)) > 0
+                    if has_defect.sum() > 0:
+                        pro = compute_pro(gt_masks_np[has_defect], anomaly_maps_np[has_defect], num_thresholds=50)
+                summary_results.append({"dataset": dataset, "category": category, "auroc": auroc, "pro": pro, "n": len(y_true)})
+
             infer_t = self.last_inference_time
             n_img = self.last_n_images
             ms_per_img = (infer_t / n_img * 1000) if n_img > 0 else 0
-            msg = (
-                f"[{idx}/{total}] {dataset}/{category} done "
-                f"(inference: {infer_t:.2f}s, {ms_per_img:.1f}ms/img)"
-            )
+            msg = f"[{idx}/{total}] {dataset}/{category} done (inference: {infer_t:.2f}s, {ms_per_img:.1f}ms/img)"
             print(f"✓ {msg}")
             get_inference_logger().info(msg)
+
+        # Print summary table
+        if summary_results:
+            print("\n" + "=" * 70)
+            print("EVALUATION SUMMARY")
+            print("=" * 70)
+            print(f"{'Dataset':<15} {'Category':<20} {'AUROC':>10} {'PRO':>10} {'Samples':>10}")
+            print("-" * 70)
+            for r in summary_results:
+                pro_str = f"{r['pro']:.4f}" if r['pro'] is not None else "N/A"
+                print(f"{r['dataset']:<15} {r['category']:<20} {r['auroc']:>10.4f} {pro_str:>10} {r['n']:>10}")
+            avg_auroc = np.mean([r['auroc'] for r in summary_results])
+            pro_values = [r['pro'] for r in summary_results if r['pro'] is not None]
+            avg_pro = np.mean(pro_values) if pro_values else None
+            avg_pro_str = f"{avg_pro:.4f}" if avg_pro is not None else "N/A"
+            total_samples = sum(r['n'] for r in summary_results)
+            print("-" * 70)
+            print(f"{'Average':<15} {'':<20} {avg_auroc:>10.4f} {avg_pro_str:>10} {total_samples:>10}")
+            print("=" * 70)
 
         get_inference_logger().info(f"predict_all completed: {total} categories")
         return all_predictions
