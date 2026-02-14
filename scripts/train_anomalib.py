@@ -27,13 +27,9 @@ if str(PROJ_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJ_ROOT))
 
 import torch
-from anomalib.models import Patchcore, WinClip, EfficientAd
-from anomalib.models.image.efficient_ad.torch_model import EfficientAdModelSize
+from anomalib.models import Patchcore
 from anomalib.engine import Engine
-from pytorch_lightning.callbacks import Callback, EarlyStopping
-
-# PyTorch 2.6+ weights_only=True 대응: Anomalib 클래스 허용
-torch.serialization.add_safe_globals([EfficientAdModelSize])
+from pytorch_lightning.callbacks import Callback
 
 from src.utils.loaders import load_config
 from src.utils.log import setup_logger
@@ -87,49 +83,15 @@ class EpochProgressCallback(Callback):
         print(" | ".join(parts), flush=True)
 
 
-class EarlyStoppingTracker(Callback):
-    """Early Stopping 이벤트를 추적하고 wandb에 기록하는 콜백."""
-
-    def __init__(self, early_stopping_config: dict):
-        super().__init__()
-        self.config = early_stopping_config
-
-    def on_train_end(self, trainer, pl_module):
-        """학습 종료 시 early stopping 정보를 wandb에 기록."""
-        import wandb
-
-        # EarlyStopping 콜백에서 정보 추출
-        early_stopping_cb = None
-        for cb in trainer.callbacks:
-            if isinstance(cb, EarlyStopping):
-                early_stopping_cb = cb
-                break
-
-        if early_stopping_cb is None:
-            return
-
-        # Early stopping으로 종료되었는지 확인
-        was_early_stopped = trainer.current_epoch < (trainer.max_epochs - 1)
-        stopped_epoch = trainer.current_epoch + 1
-        best_score = early_stopping_cb.best_score
-        patience = self.config.get("patience", 10)
-
-        # 콘솔 출력
-        if was_early_stopped:
-            print(f"\n⚡ Early Stopping triggered at epoch {stopped_epoch}")
-            print(f"   Best {self.config.get('monitor', 'metric')}: {best_score:.4f}")
-            get_train_logger().info(f"Early Stopping at epoch {stopped_epoch}, best score: {best_score:.4f}")
-
-        # wandb에 기록 (2가지만)
-        if wandb.run is not None:
-            wandb.run.summary["early_stopping/patience_setting"] = patience  # 초기 patience 설정값
-            wandb.run.summary["early_stopping/stopped_epoch"] = stopped_epoch  # 실제 종료된 epoch
-
-
 class Anomalibs:
     def __init__(self, config_path: str = "configs/anomaly.yaml"):
         self.config = load_config(config_path)
         self.model_name = self.config["anomaly"]["model"]
+        if self.model_name != "patchcore":
+            raise ValueError(
+                f"Only patchcore is supported in this script now. "
+                f"Set anomaly.model=patchcore (got: {self.model_name})"
+            )
         self.model_params = self.filter_none(
             self.config["anomaly"].get(self.model_name, {})
         )
@@ -163,14 +125,9 @@ class Anomalibs:
     def filter_none(d: dict) -> dict:
         return {k: v for k, v in d.items() if v is not None}
 
-    # 모델별 checkpoint/early_stopping monitor 설정
-    # - patchcore: 1 epoch만 학습, metric 로깅 없음 → monitor=None
-    # - efficientad: iterative 학습, train_loss가 매 epoch 로깅됨
-    # - winclip: zero-shot, 학습 없음
+    # patchcore는 metric monitor 기반 top-k 저장 대신 epoch별 저장 사용.
     MODEL_METRICS = {
         "patchcore": {"monitor": None, "mode": "max"},
-        "efficientad": {"monitor": "train_loss", "mode": "min"},
-        "winclip": {"monitor": None, "mode": "max"},
     }
 
     def get_evaluator(self):
@@ -194,22 +151,16 @@ class Anomalibs:
         from anomalib.pre_processing import PreProcessor
         from torchvision.transforms.v2 import Normalize
 
-        model_class = {"patchcore": Patchcore, "winclip": WinClip, "efficientad": EfficientAd}.get(self.model_name)
-        if model_class is None:
-            raise ValueError(f"Unknown model: {self.model_name}")
-
         # Resize는 DataModule에서 처리, pre_processor는 Normalize만
         transform = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         pre_processor = PreProcessor(transform=transform)
-        return model_class(pre_processor=pre_processor, **self.model_params)
+        return Patchcore(pre_processor=pre_processor, **self.model_params)
 
     def get_datamodule_kwargs(self):
         # datamodule kwargs from training config
         kwargs = {}
         if "train_batch_size" in self.training_config:
             kwargs["train_batch_size"] = self.training_config["train_batch_size"]
-        elif self.model_name == "efficientad":
-            kwargs["train_batch_size"] = 1  # EfficientAd 1 필수
         if "eval_batch_size" in self.training_config:
             kwargs["eval_batch_size"] = self.training_config["eval_batch_size"]
         if "num_workers" in self.training_config:
@@ -236,7 +187,7 @@ class Anomalibs:
                 if batch_size is None and datamodule is not None:
                     batch_size = getattr(datamodule, "train_batch_size", None)
                 if batch_size is None:
-                    batch_size = 1 if self.model_name == "efficientad" else 32
+                    batch_size = 32
 
                 img_size = self.config.get("data", {}).get("image_size", (256, 256))
                 max_epochs = self.training_config.get("max_epochs") or 100
@@ -310,36 +261,10 @@ class Anomalibs:
                 )
             callbacks.append(model_checkpoint_callback)
 
-        # Early Stopping Callback (특정 모델만)
+        # Early stopping is intentionally disabled for patchcore in this script.
         early_stop_config = self.training_config.get("early_stopping", {})
-        models_need_early_stopping = ["efficientad"]
-
-        if (
-            early_stop_config.get("enabled", False)
-            and self.model_name in models_need_early_stopping
-        ):
-            model_metric = self.MODEL_METRICS.get(
-                self.model_name, {"monitor": "image_AUROC", "mode": "max"}
-            )
-            es_monitor = model_metric["monitor"]
-            es_mode = model_metric["mode"]
-
-            early_stopping_callback = EarlyStopping(
-                monitor=es_monitor,
-                patience=early_stop_config.get("patience", 10),
-                mode=es_mode,
-                verbose=True,
-                check_on_train_epoch_end=True,
-            )
-            callbacks.append(early_stopping_callback)
-
-            callbacks.append(EarlyStoppingTracker(early_stop_config))
-            get_train_logger().info(
-                f"Early Stopping enabled: monitor={es_monitor}, "
-                f"patience={early_stop_config.get('patience')}, mode={es_mode}"
-            )
-        elif early_stop_config.get("enabled", False) and self.model_name not in models_need_early_stopping:
-            get_train_logger().info(f"Early Stopping skipped: {self.model_name} doesn't need iterative training")
+        if early_stop_config.get("enabled", False):
+            get_train_logger().info("Early Stopping is ignored for patchcore.")
 
         kwargs = {
             "accelerator": self.engine_config.get("accelerator", "auto"),
@@ -353,20 +278,11 @@ class Anomalibs:
         if "max_epochs" in self.training_config:
             kwargs["max_epochs"] = self.training_config["max_epochs"]
 
-        if (
-            early_stop_config.get("enabled", False)
-            and early_stop_config.get("min_epochs")
-            and self.model_name in models_need_early_stopping
-        ):
-            kwargs["min_epochs"] = early_stop_config["min_epochs"]
-
         return Engine(**kwargs)
 
     # Anomalib이 저장하는 실제 폴더명 매핑
     MODEL_DIR_MAP = {
         "patchcore": "Patchcore",
-        "winclip": "WinClip",
-        "efficientad": "EfficientAd",
     }
 
     def get_category_dir(self, dataset: str, category: str) -> Path:
@@ -423,9 +339,6 @@ class Anomalibs:
 
         model-v2.ckpt > model-v1.ckpt > model.ckpt 순으로 최신 선택
         """
-        if self.model_name == "winclip":
-            return None
-
         target_version = self.predict_config.get("version", None)
 
         if target_version is not None:
@@ -480,14 +393,7 @@ class Anomalibs:
         best_ckpt = max(model_ckpts, key=get_version)
         return best_ckpt
 
-    def requires_fit(self) -> bool:
-        return self.model_name != "winclip"
-
     def fit(self, dataset: str, category: str):
-        if not self.requires_fit():
-            get_train_logger().info(f"{self.model_name} - no training required (zero-shot)")
-            return self
-
         # --- Resume/Version 관리 ---
         resume_training = self.training_config.get("resume", False)
         ckpt_path_to_use = None
@@ -548,10 +454,6 @@ class Anomalibs:
         elif ckpt_path is not None:
             get_inference_logger().info(f"Loading checkpoint: {ckpt_path}")
             model = model.__class__.load_from_checkpoint(str(ckpt_path), weights_only=False)
-
-        # WinCLIP requires class name for text embeddings
-        if self.model_name == "winclip":
-            model.setup(class_name=category)
 
         model.eval()
         model.to(self.device)
