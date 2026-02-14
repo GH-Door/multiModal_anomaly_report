@@ -115,6 +115,7 @@ class LLaVAClient(BaseLLMClient):
         few_shot_paths: List[str],
         questions: List[Dict[str, str]],
         ad_info: Optional[Dict] = None,
+        instruction: Optional[str] = None,
     ) -> dict:
         """Build LLaVA message format."""
         return {
@@ -279,6 +280,7 @@ class LLaVAClient(BaseLLMClient):
         meta: dict,
         few_shot_paths: List[str],
         ad_info: Optional[Dict] = None,
+        instruction: Optional[str] = None,
     ) -> Tuple[List[Dict], List[str], Optional[List[str]], List[str]]:
         """Generate answers one question at a time."""
         questions, answers, question_types = self.parse_conversation(meta)
@@ -317,6 +319,7 @@ class LLaVAClient(BaseLLMClient):
         meta: dict,
         few_shot_paths: List[str],
         ad_info: Optional[Dict] = None,
+        instruction: Optional[str] = None,
     ) -> Tuple[List[Dict], List[str], Optional[List[str]], List[str]]:
         """Generate answers for ALL questions in a single model call (5-8x faster)."""
         questions, answers, question_types = self.parse_conversation(meta)
