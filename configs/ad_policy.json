@@ -1,53 +1,65 @@
 {
-  "schema_version": "ad_policy_v1",
+  "schema_version": "ad_context_rules_v2",
   "default": {
+    "review_band": 0.08,
+    "location_mode": "normal",
+    "reliability": "medium",
+    "ad_weight": 0.6,
+    "min_location_confidence": 0.25,
     "t_low": 0.35,
     "t_high": 0.65,
-    "reliability": "high",
-    "ad_weight": 0.7,
-    "use_bbox": true,
-    "min_location_confidence": 0.25
+    "use_bbox": true
   },
   "classes": {
     "GoodsAD/food_box": {
+      "review_band": 0.3,
+      "reliability": "low",
+      "ad_weight": 0.2,
+      "location_mode": "off",
+      "min_location_confidence": 0.35,
       "t_low": 0.35,
       "t_high": 0.95,
-      "reliability": "low",
-      "ad_weight": 0.2,
-      "use_bbox": false,
-      "min_location_confidence": 0.35
+      "use_bbox": false
     },
     "GoodsAD/food_package": {
+      "review_band": 0.275,
+      "reliability": "low",
+      "ad_weight": 0.2,
+      "location_mode": "off",
+      "min_location_confidence": 0.35,
       "t_low": 0.38,
       "t_high": 0.93,
-      "reliability": "low",
-      "ad_weight": 0.2,
-      "use_bbox": false,
-      "min_location_confidence": 0.35
+      "use_bbox": false
     },
     "MVTec-LOCO/pushpins": {
-      "t_low": 0.43,
-      "t_high": 0.67,
+      "review_band": 0.12,
       "reliability": "low",
       "ad_weight": 0.2,
-      "use_bbox": false,
-      "min_location_confidence": 0.35
+      "location_mode": "off",
+      "min_location_confidence": 0.35,
+      "t_low": 0.43,
+      "t_high": 0.67,
+      "use_bbox": false
     },
     "MVTec-LOCO/screw_bag": {
-      "t_low": 0.49,
-      "t_high": 0.72,
+      "review_band": 0.115,
       "reliability": "low",
       "ad_weight": 0.25,
-      "use_bbox": true,
-      "min_location_confidence": 0.4
+      "location_mode": "strict",
+      "min_location_confidence": 0.4,
+      "t_low": 0.49,
+      "t_high": 0.72,
+      "use_bbox": true
     },
     "MVTec-LOCO/breakfast_box": {
-      "t_low": 0.42,
-      "t_high": 0.6,
+      "review_band": 0.09,
       "reliability": "medium",
       "ad_weight": 0.45,
-      "use_bbox": true,
-      "min_location_confidence": 0.3
+      "location_mode": "normal",
+      "min_location_confidence": 0.3,
+      "t_low": 0.42,
+      "t_high": 0.6,
+      "use_bbox": true
     }
   }
 }
