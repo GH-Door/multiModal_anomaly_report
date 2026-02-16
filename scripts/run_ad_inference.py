@@ -1375,13 +1375,13 @@ def main() -> None:
     parser.add_argument(
         "--policy-json",
         type=str,
-        default="configs/ad_policy_reproducible.json",
+        default="configs/ad_policy.json",
         help="Decision-rules JSON path (internal only; not exported in output JSON)",
     )
     parser.add_argument(
         "--calibration-json",
         type=str,
-        default="configs/ad_calibration_reproducible.json",
+        default="configs/ad_calibration.json",
         help="Optional calibration JSON with class-wise threshold bands for AD context.",
     )
     parser.add_argument(
