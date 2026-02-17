@@ -123,6 +123,7 @@ class LLaVAClient(BaseLLMClient):
             "few_shot_paths": few_shot_paths,
             "questions": questions,
             "ad_info": ad_info,
+            "instruction": instruction,
         }
 
     def _generate_hf(self, payload: dict) -> str:
@@ -131,10 +132,12 @@ class LLaVAClient(BaseLLMClient):
 
         # Select instruction based on AD info availability
         ad_info = payload.get("ad_info")
-        if ad_info:
-            instruction = INSTRUCTION_WITH_AD.format(ad_info=format_ad_info(ad_info))
-        else:
-            instruction = INSTRUCTION
+        instruction = payload.get("instruction")
+        if instruction is None:
+            if ad_info:
+                instruction = INSTRUCTION_WITH_AD.format(ad_info=format_ad_info(ad_info))
+            else:
+                instruction = INSTRUCTION
 
         # Build prompt
         prompt = f"USER: {instruction}\n"
@@ -194,10 +197,12 @@ class LLaVAClient(BaseLLMClient):
 
         # Select instruction based on AD info availability
         ad_info = payload.get("ad_info")
-        if ad_info:
-            hint = INSTRUCTION_WITH_AD.format(ad_info=format_ad_info(ad_info))
-        else:
-            hint = INSTRUCTION
+        hint = payload.get("instruction")
+        if hint is None:
+            if ad_info:
+                hint = INSTRUCTION_WITH_AD.format(ad_info=format_ad_info(ad_info))
+            else:
+                hint = INSTRUCTION
 
         question = ""
         if payload["few_shot_paths"]:
@@ -292,7 +297,13 @@ class LLaVAClient(BaseLLMClient):
 
         for i in range(len(questions)):
             part_questions = questions[i:i + 1]
-            payload = self.build_payload(query_image_path, few_shot_paths, part_questions, ad_info=ad_info)
+            payload = self.build_payload(
+                query_image_path,
+                few_shot_paths,
+                part_questions,
+                ad_info=ad_info,
+                instruction=instruction,
+            )
 
             response = self.send_request(payload)
             if response is None:
@@ -328,7 +339,13 @@ class LLaVAClient(BaseLLMClient):
             return questions, answers, None, question_types
 
         # Build payload with ALL questions at once
-        payload = self.build_payload(query_image_path, few_shot_paths, questions, ad_info=ad_info)
+        payload = self.build_payload(
+            query_image_path,
+            few_shot_paths,
+            questions,
+            ad_info=ad_info,
+            instruction=instruction,
+        )
 
         # Single model call for all questions
         response = self.send_request(payload)
