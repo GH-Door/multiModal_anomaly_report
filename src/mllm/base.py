@@ -146,23 +146,61 @@ def format_ad_info(ad_info: dict) -> str:
 
     lines = []
 
-    # Anomaly score & judgment
-    score = ad_info.get("anomaly_score")
-    is_anomaly = ad_info.get("is_anomaly")
-    if score is not None:
-        status = "ANOMALOUS" if is_anomaly else "NORMAL"
-        lines.append(f"- Anomaly detection result: {status} (score: {score:.2f})")
+    def _to_float(v: Any) -> Optional[float]:
+        try:
+            if v is None:
+                return None
+            return float(v)
+        except (TypeError, ValueError):
+            return None
 
-    # Defect location
+    score = _to_float(ad_info.get("anomaly_score"))
+    decision = str(ad_info.get("decision", "")).strip().lower()
+    is_anomaly = ad_info.get("is_anomaly")
+
+    if decision in {"anomaly", "normal", "review_needed"}:
+        decision_label = decision.upper()
+        if score is not None:
+            lines.append(f"- AD decision: {decision_label} (score: {score:.2f})")
+        else:
+            lines.append(f"- AD decision: {decision_label}")
+    elif score is not None:
+        status = "ANOMALOUS" if is_anomaly else "NORMAL"
+        lines.append(f"- AD result: {status} (score: {score:.2f})")
+
+    decision_conf = _to_float(ad_info.get("decision_confidence"))
+    if decision_conf is not None:
+        lines.append(f"- Decision confidence: {decision_conf:.2f} (0-1)")
+
+    confidence = ad_info.get("confidence", {})
+    if isinstance(confidence, dict):
+        reliability = str(confidence.get("reliability", "")).strip().lower()
+        if reliability:
+            lines.append(f"- AD reliability for this class: {reliability}")
+
+    guidance = ad_info.get("report_guidance", {})
+    if isinstance(guidance, dict):
+        use_for_decision = guidance.get("use_ad_for_anomaly_judgement")
+        use_for_location = guidance.get("use_ad_for_location")
+        if use_for_decision:
+            lines.append(f"- Use AD for anomaly judgement: {use_for_decision}")
+        if use_for_location:
+            lines.append(f"- Use AD for location hints: {use_for_location}")
+
+    reason_codes = ad_info.get("reason_codes")
+    if isinstance(reason_codes, list) and reason_codes:
+        joined = ", ".join(str(x) for x in reason_codes[:6])
+        lines.append(f"- Caution flags: {joined}")
+
     loc = ad_info.get("defect_location", {})
-    if loc.get("has_defect"):
+    if isinstance(loc, dict) and loc.get("has_defect"):
         region = loc.get("region", "unknown")
-        area = loc.get("area_ratio", 0)
-        lines.append(f"- Defect location: {region}")
-        if area > 0:
-            lines.append(f"- Defect area: {area * 100:.1f}% of the image")
-    elif loc and not loc.get("has_defect"):
-        lines.append("- No localized defect detected")
+        area = _to_float(loc.get("area_ratio"))
+        lines.append(f"- Defect location hint: {region}")
+        if area is not None and area > 0:
+            lines.append(f"- Defect area hint: {area * 100:.1f}% of image")
+    elif isinstance(loc, dict) and loc:
+        lines.append("- No reliable localized defect hint")
 
     if not lines:
         return "No anomaly detection information available."

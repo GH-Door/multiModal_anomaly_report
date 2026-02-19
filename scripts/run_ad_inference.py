@@ -50,55 +50,73 @@ from src.anomaly import PatchCoreModelManager
 from src.utils.loaders import load_config
 
 DEFAULT_AD_POLICY: Dict[str, Any] = {
-    "schema_version": "ad_policy_v1",
+    "schema_version": "ad_context_rules_v2",
     "default": {
+        "review_band": 0.08,
+        "location_mode": "normal",
+        "reliability": "medium",
+        "ad_weight": 0.6,
+        "min_location_confidence": 0.25,
+        # Legacy compatibility keys
         "t_low": 0.35,
         "t_high": 0.65,
-        "reliability": "high",
-        "ad_weight": 0.7,
         "use_bbox": True,
-        "min_location_confidence": 0.25,
     },
     "classes": {
         "GoodsAD/food_box": {
+            "review_band": 0.30,
+            "reliability": "low",
+            "ad_weight": 0.2,
+            "location_mode": "off",
+            "min_location_confidence": 0.35,
+            # Legacy compatibility keys
             "t_low": 0.35,
             "t_high": 0.95,
-            "reliability": "low",
-            "ad_weight": 0.2,
             "use_bbox": False,
-            "min_location_confidence": 0.35,
         },
         "GoodsAD/food_package": {
+            "review_band": 0.275,
+            "reliability": "low",
+            "ad_weight": 0.2,
+            "location_mode": "off",
+            "min_location_confidence": 0.35,
+            # Legacy compatibility keys
             "t_low": 0.38,
             "t_high": 0.93,
-            "reliability": "low",
-            "ad_weight": 0.2,
             "use_bbox": False,
-            "min_location_confidence": 0.35,
         },
         "MVTec-LOCO/pushpins": {
-            "t_low": 0.43,
-            "t_high": 0.67,
+            "review_band": 0.12,
             "reliability": "low",
             "ad_weight": 0.2,
-            "use_bbox": False,
+            "location_mode": "off",
             "min_location_confidence": 0.35,
+            # Legacy compatibility keys
+            "t_low": 0.43,
+            "t_high": 0.67,
+            "use_bbox": False,
         },
         "MVTec-LOCO/screw_bag": {
-            "t_low": 0.49,
-            "t_high": 0.72,
+            "review_band": 0.115,
             "reliability": "low",
             "ad_weight": 0.25,
-            "use_bbox": True,
+            "location_mode": "strict",
             "min_location_confidence": 0.4,
+            # Legacy compatibility keys
+            "t_low": 0.49,
+            "t_high": 0.72,
+            "use_bbox": True,
         },
         "MVTec-LOCO/breakfast_box": {
-            "t_low": 0.42,
-            "t_high": 0.60,
+            "review_band": 0.09,
             "reliability": "medium",
             "ad_weight": 0.45,
-            "use_bbox": True,
+            "location_mode": "normal",
             "min_location_confidence": 0.3,
+            # Legacy compatibility keys
+            "t_low": 0.42,
+            "t_high": 0.60,
+            "use_bbox": True,
         },
     },
 }
@@ -171,16 +189,16 @@ def compute_confidence_level(anomaly_score: float) -> Dict[str, Any]:
         reason = "Strong normal signal (score < 0.2)"
     elif anomaly_score > 0.6 or anomaly_score < 0.4:
         level = "medium"
-        reason = "Moderate confidence (score between 0.4-0.6 boundary)"
+        reason = "Moderate confidence (score away from threshold neighborhood)"
     else:
         level = "low"
-        reason = "Score near decision boundary (0.4-0.6)"
+        reason = "Score near threshold neighborhood"
 
     return {
         "level": level,
-        "reliability": "high",
+        "reliability": "medium",
         "reason": reason,
-        "reliability_reason": "Policy-controlled reliability",
+        "reliability_reason": "Default reliability (no class calibration applied).",
     }
 
 
@@ -258,6 +276,15 @@ def _clip01(value: float) -> float:
     return float(max(0.0, min(1.0, value)))
 
 
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _deep_copy_json_obj(obj: Dict[str, Any]) -> Dict[str, Any]:
     return json.loads(json.dumps(obj))
 
@@ -304,34 +331,165 @@ def resolve_class_policy(policy: Dict[str, Any], dataset: str, category: str) ->
     if isinstance(class_policy, dict):
         merged.update(class_policy)
 
-    merged["class_key"] = class_key
-    merged["t_low"] = float(merged.get("t_low", 0.35))
-    merged["t_high"] = float(merged.get("t_high", 0.65))
-    merged["ad_weight"] = float(merged.get("ad_weight", 0.7))
-    merged["use_bbox"] = bool(merged.get("use_bbox", True))
-    merged["min_location_confidence"] = float(merged.get("min_location_confidence", 0.25))
-    merged["reliability"] = str(merged.get("reliability", "high")).lower()
+    reliability = str(merged.get("reliability", merged.get("reliability_prior", "medium"))).lower()
+    if reliability not in {"high", "medium", "low"}:
+        reliability = "medium"
 
-    if merged["t_low"] > merged["t_high"]:
-        merged["t_low"], merged["t_high"] = merged["t_high"], merged["t_low"]
-    return merged
+    # Prefer v2 key first; fallback to legacy use_bbox only when location_mode is absent.
+    if "location_mode" in merged:
+        location_mode = str(merged.get("location_mode", "normal")).lower()
+    elif "use_bbox" in merged:
+        location_mode = "normal" if bool(merged.get("use_bbox", True)) else "off"
+    else:
+        location_mode = "normal"
+    if location_mode not in {"normal", "strict", "off"}:
+        location_mode = "normal"
+
+    review_band = _safe_float(merged.get("review_band"))
+    legacy_center: Optional[float] = _safe_float(merged.get("decision_center"))
+    t_low = _safe_float(merged.get("t_low"))
+    t_high = _safe_float(merged.get("t_high"))
+    if t_low is not None and t_high is not None and t_low > t_high:
+        t_low, t_high = t_high, t_low
+    if legacy_center is None and t_low is not None and t_high is not None:
+        legacy_center = (t_low + t_high) / 2.0
+    if review_band is None:
+        if t_low is not None and t_high is not None:
+            review_band = (t_high - t_low) / 2.0
+        else:
+            review_band = 0.08
+    review_band = max(0.02, min(0.30, float(review_band)))
+
+    ad_weight = _safe_float(merged.get("ad_weight"))
+    if ad_weight is None:
+        ad_weight = 0.6
+    ad_weight = _clip01(ad_weight)
+
+    min_loc_conf = _safe_float(merged.get("min_location_confidence"))
+    if min_loc_conf is None:
+        min_loc_conf = 0.25
+    min_loc_conf = _clip01(min_loc_conf)
+
+    return {
+        "class_key": class_key,
+        "reliability": reliability,
+        "ad_weight": ad_weight,
+        "location_mode": location_mode,
+        "min_location_confidence": min_loc_conf,
+        "review_band": review_band,
+        "legacy_center": legacy_center,
+    }
 
 
-def decide_with_policy(anomaly_score: float, class_policy: Dict[str, Any]) -> Tuple[str, bool]:
-    t_low = float(class_policy["t_low"])
-    t_high = float(class_policy["t_high"])
+def load_ad_calibration(calibration_path: Optional[Path]) -> Dict[str, Any]:
+    if calibration_path is None:
+        return {}
+    if not calibration_path.exists():
+        return {}
+    try:
+        with open(calibration_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    classes = loaded.get("classes")
+    if not isinstance(classes, dict):
+        loaded["classes"] = {}
+    return loaded
 
-    if anomaly_score < t_low:
-        return "normal", False
-    if anomaly_score > t_high:
-        return "anomaly", False
-    return "review_needed", True
+
+def resolve_class_calibration(calibration: Dict[str, Any], class_key: str) -> Dict[str, Any]:
+    if not calibration:
+        return {}
+    class_map = calibration.get("classes")
+    if not isinstance(class_map, dict):
+        return {}
+    raw = class_map.get(class_key)
+    if not isinstance(raw, dict):
+        return {}
+
+    out: Dict[str, Any] = {}
+    center = (
+        _safe_float(raw.get("center_threshold"))
+        or _safe_float(raw.get("decision_threshold"))
+        or _safe_float(raw.get("threshold_opt"))
+    )
+    review_band = (
+        _safe_float(raw.get("review_band"))
+        or _safe_float(raw.get("uncertainty_band"))
+        or _safe_float(raw.get("decision_band"))
+    )
+    if center is not None:
+        out["center_threshold"] = center
+    if review_band is not None:
+        out["review_band"] = max(0.02, min(0.30, float(review_band)))
+
+    for key in ("auroc", "fpr", "fnr", "n_samples"):
+        val = _safe_float(raw.get(key))
+        if val is not None:
+            out[key] = val
+    return out
+
+
+def decide_with_policy(
+    anomaly_score: float,
+    class_policy: Dict[str, Any],
+    *,
+    model_threshold: float,
+    class_calibration: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, bool, Dict[str, Any]]:
+    class_calibration = class_calibration or {}
+    center = _safe_float(class_calibration.get("center_threshold"))
+    if center is None:
+        center = _safe_float(class_policy.get("legacy_center"))
+    if center is None:
+        center = float(model_threshold)
+
+    base_band = float(class_policy.get("review_band", 0.08))
+    calib_band = _safe_float(class_calibration.get("review_band"))
+    if calib_band is not None:
+        base_band = max(base_band, calib_band)
+
+    reliability_scale = {
+        "high": 0.9,
+        "medium": 1.0,
+        "low": 1.3,
+    }.get(str(class_policy.get("reliability", "medium")), 1.0)
+    uncertainty_band = max(0.02, min(0.35, base_band * reliability_scale))
+
+    score_delta = float(anomaly_score) - float(center)
+    if score_delta > uncertainty_band:
+        decision = "anomaly"
+        review_needed = False
+    elif score_delta < -uncertainty_band:
+        decision = "normal"
+        review_needed = False
+    else:
+        decision = "review_needed"
+        review_needed = True
+
+    decision_confidence = round(
+        _clip01(abs(score_delta) / max(1e-6, uncertainty_band * 2.5)),
+        4,
+    )
+    return decision, review_needed, {
+        "decision_confidence": decision_confidence,
+        "basis": {
+            "center_threshold": round(float(center), 4),
+            "uncertainty_band": round(float(uncertainty_band), 4),
+            "score_delta": round(float(score_delta), 4),
+            "used_calibration": bool(class_calibration),
+        },
+    }
 
 
 def compute_location_confidence(
     *,
     anomaly_score: float,
+    model_threshold: float,
     class_policy: Dict[str, Any],
+    decision_basis: Dict[str, Any],
     map_stats: Optional[Dict[str, float]],
     defect_location: Dict[str, Any],
     review_needed: bool,
@@ -339,10 +497,15 @@ def compute_location_confidence(
     if not defect_location.get("has_defect", False):
         return 0.0
 
-    t_low = float(class_policy["t_low"])
-    t_high = float(class_policy["t_high"])
-    denom = max(1e-6, t_high - t_low)
-    score_factor = _clip01((anomaly_score - t_low) / denom)
+    center = _safe_float(decision_basis.get("center_threshold"))
+    if center is None:
+        center = float(model_threshold)
+    band = _safe_float(decision_basis.get("uncertainty_band"))
+    if band is None:
+        band = float(class_policy.get("review_band", 0.08))
+    band = max(1e-6, float(band))
+    score_margin = abs(float(anomaly_score) - float(center))
+    score_factor = _clip01(score_margin / (2.0 * band))
 
     area_ratio = float(defect_location.get("area_ratio", 0.0))
     if area_ratio <= 0.2:
@@ -362,15 +525,21 @@ def compute_location_confidence(
 
     reliability_factor = {
         "high": 1.0,
-        "medium": 0.75,
-        "low": 0.5,
-    }.get(str(class_policy.get("reliability", "high")), 0.75)
+        "medium": 0.8,
+        "low": 0.6,
+    }.get(str(class_policy.get("reliability", "medium")), 0.8)
 
-    use_bbox_factor = 1.0 if bool(class_policy.get("use_bbox", True)) else 0.25
-    review_factor = 0.7 if review_needed else 1.0
+    location_mode = str(class_policy.get("location_mode", "normal"))
+    location_mode_factor = {
+        "normal": 1.0,
+        "strict": 0.8,
+        "off": 0.1,
+    }.get(location_mode, 1.0)
 
-    score = (0.45 * score_factor + 0.35 * peak_factor + 0.20 * area_factor)
-    score = score * reliability_factor * use_bbox_factor * review_factor
+    review_factor = 0.65 if review_needed else 1.0
+
+    score = (0.40 * score_factor + 0.40 * peak_factor + 0.20 * area_factor)
+    score = score * reliability_factor * location_mode_factor * review_factor
     return round(_clip01(score), 4)
 
 
@@ -378,31 +547,46 @@ def build_reason_codes(
     *,
     anomaly_score: float,
     class_policy: Dict[str, Any],
+    class_calibration: Dict[str, Any],
     decision: str,
+    decision_confidence: float,
+    decision_basis: Dict[str, Any],
     defect_location: Dict[str, Any],
     location_confidence: float,
 ) -> List[str]:
     codes: List[str] = []
-    t_low = float(class_policy["t_low"])
-    t_high = float(class_policy["t_high"])
-    reliability = str(class_policy.get("reliability", "high"))
-    use_bbox = bool(class_policy.get("use_bbox", True))
+    reliability = str(class_policy.get("reliability", "medium"))
+    location_mode = str(class_policy.get("location_mode", "normal"))
     min_loc_conf = float(class_policy.get("min_location_confidence", 0.25))
 
     if decision == "review_needed":
-        codes.append("NEAR_DECISION_BAND")
+        codes.append("NEAR_DECISION_BOUNDARY")
+    if decision_confidence < 0.35:
+        codes.append("LOW_DECISION_CONFIDENCE")
     if reliability == "low":
         codes.append("LOW_RELIABILITY_CLASS")
     elif reliability == "medium":
         codes.append("MEDIUM_RELIABILITY_CLASS")
-    if not use_bbox:
-        codes.append("BBOX_DISABLED_BY_POLICY")
+    if not class_calibration:
+        codes.append("NO_CLASS_CALIBRATION")
+    if location_mode == "off":
+        codes.append("LOCATION_HINT_DISABLED")
+    elif location_mode == "strict":
+        codes.append("STRICT_LOCATION_POLICY")
     if not defect_location.get("has_defect", False):
         codes.append("NO_DEFECT_REGION_FROM_MAP")
     if location_confidence < min_loc_conf:
         codes.append("LOW_LOCATION_CONFIDENCE")
 
-    if anomaly_score > t_high and defect_location.get("has_defect", False):
+    threshold = _safe_float(decision_basis.get("center_threshold"))
+    band = _safe_float(decision_basis.get("uncertainty_band"))
+    if threshold is not None and band is not None:
+        if anomaly_score > threshold + (2.0 * band):
+            codes.append("STRONG_ANOMALY_MARGIN")
+        elif anomaly_score < threshold - (2.0 * band):
+            codes.append("STRONG_NORMAL_MARGIN")
+
+    if defect_location.get("has_defect", False):
         area_ratio = float(defect_location.get("area_ratio", 0.0))
         if area_ratio > 0.5:
             codes.append("DIFFUSE_ANOMALY_REGION")
@@ -413,21 +597,25 @@ def build_llm_guidance(
     *,
     decision: str,
     class_policy: Dict[str, Any],
+    decision_confidence: float,
     reason_codes: List[str],
     location_confidence: float,
 ) -> Dict[str, Any]:
-    reliability = str(class_policy.get("reliability", "high"))
+    reliability = str(class_policy.get("reliability", "medium"))
     ad_weight = float(class_policy.get("ad_weight", 0.7))
     min_loc_conf = float(class_policy.get("min_location_confidence", 0.25))
+    location_mode = str(class_policy.get("location_mode", "normal"))
 
-    if decision == "review_needed" or reliability == "low":
+    if decision == "review_needed" or decision_confidence < 0.35 or reliability == "low":
         anomaly_use = "low"
     elif reliability == "medium":
         anomaly_use = "medium"
     else:
         anomaly_use = "high"
 
-    if bool(class_policy.get("use_bbox", True)) and location_confidence >= min_loc_conf:
+    if location_mode == "off":
+        location_use = "none"
+    elif location_mode in {"normal", "strict"} and location_confidence >= min_loc_conf:
         if reliability == "high":
             location_use = "high"
         elif reliability == "medium":
@@ -439,20 +627,19 @@ def build_llm_guidance(
 
     if decision == "review_needed":
         instruction = (
-            "AD evidence is ambiguous. Do not make a hard defect claim from AD alone; "
-            "use visual reasoning and mark as needs verification if uncertain."
+            "AD decision is near the uncertainty boundary. Use AD as weak evidence and rely on visual verification."
         )
     elif anomaly_use == "low":
         instruction = (
-            "AD class reliability is low. Use AD score as weak evidence only, and avoid strong location claims."
+            "AD reliability is limited for this class. Treat anomaly score as weak evidence."
         )
     elif anomaly_use == "medium":
         instruction = (
-            "AD evidence is usable but not definitive. Cross-check with visual cues before final judgement."
+            "AD evidence is moderately useful. Cross-check with visual cues before final judgement."
         )
     else:
         instruction = (
-            "AD evidence is reliable for anomaly existence. Use location only when location confidence is sufficient."
+            "AD evidence is strong for anomaly existence. Use location hints only if they are consistent with the image."
         )
 
     return {
@@ -460,6 +647,7 @@ def build_llm_guidance(
         "use_ad_for_location": location_use,
         "ad_weight": round(_clip01(ad_weight), 4),
         "location_confidence": location_confidence,
+        "decision_confidence": round(_clip01(decision_confidence), 4),
         "instruction": instruction,
         "reason_codes": reason_codes,
     }
@@ -834,6 +1022,8 @@ def build_output_payload(
     results: List[Dict[str, Any]],
     output_format: str,
     policy: Dict[str, Any],
+    calibration: Dict[str, Any],
+    context_mode: str,
     backend: str,
     model_threshold: float,
 ) -> Any:
@@ -844,8 +1034,10 @@ def build_output_payload(
         "schema_version": "ad_report_v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "backend": backend,
+        "context_mode": context_mode,
         "model_threshold": float(model_threshold),
         "decision_rules_version": str(policy.get("schema_version", "ad_policy_v1")),
+        "context_calibration_version": str(calibration.get("schema_version", "none")) if calibration else "none",
         "bbox_spec": {
             "format": "xyxy",
             "order": ["x_min", "y_min", "x_max", "y_max"],
@@ -861,6 +1053,8 @@ def save_results(
     *,
     output_format: str,
     policy: Dict[str, Any],
+    calibration: Dict[str, Any],
+    context_mode: str,
     backend: str,
     model_threshold: float,
 ) -> None:
@@ -868,6 +1062,8 @@ def save_results(
         results=results,
         output_format=output_format,
         policy=policy,
+        calibration=calibration,
+        context_mode=context_mode,
         backend=backend,
         model_threshold=model_threshold,
     )
@@ -883,8 +1079,19 @@ def build_result_dict(
     pred: Dict[str, Any],
     *,
     policy: Dict[str, Any],
+    calibration: Dict[str, Any],
+    context_mode: str,
     include_map_stats: bool,
 ) -> Dict[str, Any]:
+    if context_mode == "legacy":
+        return build_result_dict_legacy(
+            image_path=image_path,
+            dataset=dataset,
+            category=category,
+            pred=pred,
+            include_map_stats=include_map_stats,
+        )
+
     anomaly_score = round(float(pred["anomaly_score"]), 4)
     threshold = float(pred.get("threshold", 0.5))
     anomaly_map = pred.get("anomaly_map")
@@ -895,7 +1102,13 @@ def build_result_dict(
     map_size = tuple(map_size_list) if isinstance(map_size_list, list) and len(map_size_list) == 2 else None
 
     class_policy = resolve_class_policy(policy, dataset, category)
-    decision, review_needed = decide_with_policy(anomaly_score, class_policy)
+    class_calibration = resolve_class_calibration(calibration, class_policy["class_key"])
+    decision, review_needed, decision_meta = decide_with_policy(
+        anomaly_score,
+        class_policy,
+        model_threshold=threshold,
+        class_calibration=class_calibration,
+    )
     confidence = compute_confidence_level(anomaly_score)
     confidence["reliability"] = class_policy["reliability"]
     if class_policy["reliability"] == "low":
@@ -904,6 +1117,12 @@ def build_result_dict(
         confidence["reliability_reason"] = "Policy marks this class as medium reliability; cross-check with visual cues."
     else:
         confidence["reliability_reason"] = "Policy marks this class as high reliability."
+    if class_calibration:
+        auroc = _safe_float(class_calibration.get("auroc"))
+        if auroc is not None:
+            confidence["reliability_reason"] += f" Calibrated AUROC={auroc:.3f}."
+    else:
+        confidence["reliability_reason"] += " No class-level calibration found."
 
     default_location = {
         "has_defect": False,
@@ -937,7 +1156,9 @@ def build_result_dict(
 
     location_confidence = compute_location_confidence(
         anomaly_score=anomaly_score,
+        model_threshold=threshold,
         class_policy=class_policy,
+        decision_basis=decision_meta["basis"],
         map_stats=map_stats,
         defect_location=defect_location_raw,
         review_needed=review_needed,
@@ -945,21 +1166,30 @@ def build_result_dict(
     reason_codes = build_reason_codes(
         anomaly_score=anomaly_score,
         class_policy=class_policy,
+        class_calibration=class_calibration,
         decision=decision,
+        decision_confidence=decision_meta["decision_confidence"],
+        decision_basis=decision_meta["basis"],
         defect_location=defect_location_raw,
         location_confidence=location_confidence,
     )
     report_guidance = build_llm_guidance(
         decision=decision,
         class_policy=class_policy,
+        decision_confidence=decision_meta["decision_confidence"],
         reason_codes=reason_codes,
         location_confidence=location_confidence,
     )
 
+    min_location_conf = float(class_policy["min_location_confidence"])
+    if class_policy["location_mode"] == "strict":
+        min_location_conf = max(min_location_conf, 0.5)
+
     use_location_for_report = (
-        bool(class_policy["use_bbox"])
+        class_policy["location_mode"] != "off"
         and bool(defect_location_raw.get("has_defect", False))
-        and location_confidence >= float(class_policy["min_location_confidence"])
+        and decision != "normal"
+        and location_confidence >= min_location_conf
     )
 
     report_location = defect_location_raw if use_location_for_report else default_location
@@ -971,6 +1201,7 @@ def build_result_dict(
         report_location["location_confidence"] = location_confidence
 
     out: Dict[str, Any] = {
+        "context_version": "ad_context_v2",
         "image_path": image_path,
         "dataset": dataset,
         "category": category,
@@ -980,6 +1211,8 @@ def build_result_dict(
         "model_threshold": threshold,
         "decision": decision,
         "review_needed": review_needed,
+        "decision_confidence": decision_meta["decision_confidence"],
+        "decision_basis": decision_meta["basis"],
         "class_key": class_policy["class_key"],
         "confidence": confidence,
         "defect_location_raw": defect_location_raw,
@@ -987,6 +1220,94 @@ def build_result_dict(
         "use_location_for_report": use_location_for_report,
         "report_guidance": report_guidance,
         "reason_codes": reason_codes,
+    }
+
+    if include_map_stats and map_stats is not None:
+        out["map_stats"] = map_stats
+    return out
+
+
+def build_result_dict_legacy(
+    *,
+    image_path: str,
+    dataset: str,
+    category: str,
+    pred: Dict[str, Any],
+    include_map_stats: bool,
+) -> Dict[str, Any]:
+    anomaly_score = round(float(pred["anomaly_score"]), 4)
+    threshold = float(pred.get("threshold", 0.5))
+    anomaly_map = pred.get("anomaly_map")
+    model_is_anomaly = bool(pred["is_anomaly"])
+
+    default_location = {
+        "has_defect": False,
+        "region": "none",
+        "bbox": None,
+        "center": None,
+        "area_ratio": 0.0,
+    }
+    map_stats: Optional[Dict[str, float]] = None
+    if anomaly_map is not None:
+        map_stats = {
+            "max": round(float(np.max(anomaly_map)), 4),
+            "mean": round(float(np.mean(anomaly_map)), 4),
+            "std": round(float(np.std(anomaly_map)), 4),
+        }
+        defect_location_raw = compute_defect_location(anomaly_map, threshold)
+    else:
+        defect_location_raw = default_location
+
+    decision = "anomaly" if model_is_anomaly else "normal"
+    review_needed = False
+    decision_confidence = round(_clip01(abs(anomaly_score - threshold) / 0.25), 4)
+    use_location_for_report = bool(model_is_anomaly and defect_location_raw.get("has_defect", False))
+    defect_location = defect_location_raw if use_location_for_report else dict(default_location)
+    if use_location_for_report:
+        defect_location = dict(defect_location_raw)
+        defect_location["location_confidence"] = round(_clip01(float(defect_location_raw.get("confidence", 0.0))), 4)
+    else:
+        defect_location["location_confidence"] = 0.0
+
+    confidence = compute_confidence_level(anomaly_score)
+    confidence["reliability"] = "medium"
+    confidence["reliability_reason"] = "Legacy AD context mode (no class-wise trust calibration)."
+
+    report_guidance = {
+        "use_ad_for_anomaly_judgement": "medium",
+        "use_ad_for_location": "medium" if use_location_for_report else "low",
+        "ad_weight": 0.6,
+        "location_confidence": defect_location.get("location_confidence", 0.0),
+        "decision_confidence": decision_confidence,
+        "instruction": "Legacy AD context: use AD as supporting evidence and validate with image.",
+        "reason_codes": [],
+    }
+
+    out: Dict[str, Any] = {
+        "context_version": "ad_context_legacy_v1",
+        "image_path": image_path,
+        "dataset": dataset,
+        "category": category,
+        "backend": pred.get("backend"),
+        "anomaly_score": anomaly_score,
+        "model_is_anomaly": model_is_anomaly,
+        "model_threshold": threshold,
+        "decision": decision,
+        "review_needed": review_needed,
+        "decision_confidence": decision_confidence,
+        "decision_basis": {
+            "center_threshold": round(threshold, 4),
+            "uncertainty_band": 0.0,
+            "score_delta": round(anomaly_score - threshold, 4),
+            "used_calibration": False,
+        },
+        "class_key": f"{dataset}/{category}",
+        "confidence": confidence,
+        "defect_location_raw": defect_location_raw,
+        "defect_location": defect_location,
+        "use_location_for_report": use_location_for_report,
+        "report_guidance": report_guidance,
+        "reason_codes": [],
     }
 
     if include_map_stats and map_stats is not None:
@@ -1057,6 +1378,19 @@ def main() -> None:
         default="configs/ad_policy.json",
         help="Decision-rules JSON path (internal only; not exported in output JSON)",
     )
+    parser.add_argument(
+        "--calibration-json",
+        type=str,
+        default="configs/ad_calibration.json",
+        help="Optional calibration JSON with class-wise threshold bands for AD context.",
+    )
+    parser.add_argument(
+        "--context-mode",
+        type=str,
+        default="v2",
+        choices=["v2", "legacy"],
+        help="AD context generation mode. v2 uses reliability-aware guidance; legacy keeps old-style context.",
+    )
     parser.add_argument("--resume", action="store_true", help="Resume from existing output")
     parser.add_argument("--save-interval", type=int, default=0, help="Periodic save interval (0=save only at end)")
     parser.add_argument("--no-map-stats", action="store_true", help="Disable anomaly map summary stats")
@@ -1087,6 +1421,8 @@ def main() -> None:
     include_map_stats = not args.no_map_stats
     policy_path = Path(args.policy_json) if args.policy_json else None
     policy = load_ad_policy(policy_path)
+    calibration_path = Path(args.calibration_json) if args.calibration_json else None
+    calibration = load_ad_calibration(calibration_path)
 
     if not data_root.exists():
         print(f"Error: Data root not found: {data_root}")
@@ -1100,7 +1436,9 @@ def main() -> None:
     print(f"Backend: {args.backend}")
     print(f"Config: {args.config}")
     print(f"Output format: {args.output_format}")
+    print(f"Context mode: {args.context_mode}")
     print(f"Decision rules: {policy_path if policy_path is not None else 'default (built-in)'}")
+    print(f"Calibration: {calibration_path if calibration_path is not None else 'none'}")
     print(f"Batch size: {args.batch_size}")
     print(f"IO workers: {args.io_workers}")
     print(f"Decode reduced: x{args.decode_reduced}")
@@ -1299,6 +1637,8 @@ def main() -> None:
                             category,
                             pred,
                             policy=policy,
+                            calibration=calibration,
+                            context_mode=args.context_mode,
                             include_map_stats=include_map_stats,
                         )
                         window_build_time += time.perf_counter() - build_t0
@@ -1318,6 +1658,8 @@ def main() -> None:
                                 results,
                                 output_format=args.output_format,
                                 policy=policy,
+                                calibration=calibration,
+                                context_mode=args.context_mode,
                                 backend=args.backend,
                                 model_threshold=args.threshold,
                             )
@@ -1393,6 +1735,8 @@ def main() -> None:
         results,
         output_format=args.output_format,
         policy=policy,
+        calibration=calibration,
+        context_mode=args.context_mode,
         backend=args.backend,
         model_threshold=args.threshold,
     )

@@ -31,15 +31,21 @@ def to_llm_ad_info(prediction: Dict[str, Any] | None) -> Dict[str, Any]:
     if not isinstance(prediction, dict):
         return {}
 
+    decision = str(prediction.get("decision", "")).strip().lower()
     anomaly_score = _to_float(prediction.get("anomaly_score"))
 
-    decision = str(prediction.get("decision", "")).strip().lower()
-    if "is_anomaly" in prediction:
+    # Decision precedence:
+    # 1) explicit policy/context decision (normal/anomaly),
+    # 2) model flag for review-needed/legacy payloads,
+    # 3) score-threshold fallback.
+    if decision == "anomaly":
+        is_anomaly = True
+    elif decision == "normal":
+        is_anomaly = False
+    elif "is_anomaly" in prediction:
         is_anomaly = _to_bool(prediction.get("is_anomaly"))
     elif "model_is_anomaly" in prediction:
         is_anomaly = _to_bool(prediction.get("model_is_anomaly"))
-    elif decision:
-        is_anomaly = decision == "anomaly"
     else:
         threshold = _to_float(prediction.get("model_threshold"))
         if threshold is None:
@@ -63,10 +69,20 @@ def to_llm_ad_info(prediction: Dict[str, Any] | None) -> Dict[str, Any]:
         out["anomaly_score"] = anomaly_score
 
     # Optional fields useful for LLM-side trust control.
+    if isinstance(prediction.get("context_version"), str):
+        out["context_version"] = prediction["context_version"]
     if decision:
         out["decision"] = decision
     if "review_needed" in prediction:
         out["review_needed"] = _to_bool(prediction.get("review_needed"))
+    if "decision_confidence" in prediction:
+        decision_conf = _to_float(prediction.get("decision_confidence"))
+        if decision_conf is not None:
+            out["decision_confidence"] = decision_conf
+    if isinstance(prediction.get("decision_basis"), dict):
+        out["decision_basis"] = prediction["decision_basis"]
+    if isinstance(prediction.get("class_key"), str):
+        out["class_key"] = prediction["class_key"]
     if isinstance(prediction.get("reason_codes"), list):
         out["reason_codes"] = prediction["reason_codes"]
     if isinstance(prediction.get("report_guidance"), dict):
@@ -79,4 +95,3 @@ def to_llm_ad_info(prediction: Dict[str, Any] | None) -> Dict[str, Any]:
         out["use_location_for_report"] = _to_bool(prediction.get("use_location_for_report"))
 
     return out
-
