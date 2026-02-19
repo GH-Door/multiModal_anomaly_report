@@ -350,8 +350,9 @@ def run_experiment(cfg: ExperimentConfig) -> Path:
             ds_name = parts[0] if len(parts) > 0 else ""
             cat_name = parts[1] if len(parts) > 1 else ""
 
-            query = f"{cat_name} defect anomaly"
-            docs = rag_retriever.retrieve(query, dataset=ds_name, category=cat_name, k=3)
+            defect_type = parts[3] if len(parts) > 3 else ""
+            query = rag_retriever.build_query(cat_name, defect_type)
+            docs = rag_retriever.retrieve(query, category=cat_name, k=5)
             domain_knowledge = rag_retriever.format_context(docs)
 
             ad_info_str = format_ad_info(ad_info) if ad_info else ""

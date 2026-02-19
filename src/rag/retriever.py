@@ -59,6 +59,17 @@ class Retrievers:
             return conditions[0]
         return {"$and": conditions}
 
+    def build_query(self, category: str, defect_type: str) -> str:
+        """Build a retrieval query from image path components.
+
+        good 이미지는 결함 쿼리 대신 정상 외관 쿼리를 사용한다.
+        'carpet good defect anomaly' 같은 모순된 쿼리를 방지해
+        정상 이미지에서 불필요한 결함 문서가 검색되는 것을 막는다.
+        """
+        if defect_type == "good":
+            return f"{category} normal product appearance"
+        return f"{category} {defect_type} defect anomaly"
+
     def format_context(self, docs: List[Document]) -> str:
         """Format retrieved documents into a text block for MLLM prompts.
 
