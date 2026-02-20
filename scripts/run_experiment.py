@@ -350,8 +350,12 @@ def run_experiment(cfg: ExperimentConfig) -> Path:
             ds_name = parts[0] if len(parts) > 0 else ""
             cat_name = parts[1] if len(parts) > 1 else ""
 
-            query = f"{cat_name} defect anomaly"
-            docs = rag_retriever.retrieve(query, dataset=ds_name, category=cat_name, k=3)
+            defect_type = parts[3] if len(parts) > 3 else ""
+            query = rag_retriever.build_query(cat_name, defect_type)
+            # anomaly: defect_type 필터로 해당 결함 문서만 검색
+            # good: defect_type 필터 없이 의미 검색 + source_type="json" 으로 PDF 노이즈 차단
+            dt_filter = defect_type if defect_type != "good" else None
+            docs = rag_retriever.retrieve(query, category=cat_name, defect_type=dt_filter, k=3)
             domain_knowledge = rag_retriever.format_context(docs)
 
             ad_info_str = format_ad_info(ad_info) if ad_info else ""
