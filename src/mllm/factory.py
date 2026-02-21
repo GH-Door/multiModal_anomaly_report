@@ -49,6 +49,22 @@ MODEL_REGISTRY = {
     "llava-13b": {"type": "local", "class": "LLaVAClient", "model": "llava-hf/llava-1.5-13b-hf"},
     "llava-v1.6-7b": {"type": "local", "class": "LLaVAClient", "model": "llava-hf/llava-v1.6-mistral-7b-hf"},
     "llava-onevision": {"type": "local", "class": "LLaVAClient", "model": "llava-hf/llava-onevision-qwen2-7b-ov-hf"},
+
+    # Gemma3 models (full precision / bfloat16)
+    "gemma3": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-4b-it"},
+    "gemma3-4b": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-4b-it"},
+    "gemma3-12b": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-12b-it"},
+    "gemma3-27b": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-27b-it"},
+
+    # Gemma3 quantized — 4-bit NF4 (requires bitsandbytes + CUDA)
+    "gemma3-4b-int4": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-4b-it", "quantization": "int4"},
+    "gemma3-12b-int4": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-12b-it", "quantization": "int4"},
+    "gemma3-27b-int4": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-27b-it", "quantization": "int4"},
+
+    # Gemma3 quantized — 8-bit (requires bitsandbytes + CUDA)
+    "gemma3-4b-int8": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-4b-it", "quantization": "int8"},
+    "gemma3-12b-int8": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-12b-it", "quantization": "int8"},
+    "gemma3-27b-int8": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-27b-it", "quantization": "int8"},
 }
 
 
@@ -90,6 +106,13 @@ def get_llm_client(model_name: str, model_path: str = None, **kwargs) -> BaseLLM
             from .llava_client import LLaVAClient
             return LLaVAClient(model_path=actual_model, **kwargs)
 
+        elif info["class"] == "Gemma3Client":
+            from .gemma3_client import Gemma3Client
+            quantization = info.get("quantization")
+            if quantization is not None and "quantization" not in kwargs:
+                kwargs["quantization"] = quantization
+            return Gemma3Client(model_path=actual_model, **kwargs)
+
     # Allow direct HuggingFace model paths
     if "/" in model_name:
         model_lower_path = model_name.lower()
@@ -102,5 +125,8 @@ def get_llm_client(model_name: str, model_path: str = None, **kwargs) -> BaseLLM
         elif "llava" in model_lower_path:
             from .llava_client import LLaVAClient
             return LLaVAClient(model_path=model_name, **kwargs)
+        elif "gemma" in model_lower_path:
+            from .gemma3_client import Gemma3Client
+            return Gemma3Client(model_path=model_name, **kwargs)
 
     raise ValueError(f"Unknown model: {model_name}. Available: {list(MODEL_REGISTRY.keys())}")
