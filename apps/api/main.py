@@ -62,6 +62,14 @@ def _env_bool(name: str, default: bool) -> bool:
 INCOMING_WATCH_ENABLED = _env_bool("INCOMING_WATCH_ENABLED", True)
 RAG_ENABLED = _env_bool("RAG_ENABLED", True)
 
+LLM_MODEL_ALIASES = {
+    "internv1": "internvl",
+    "internv1-8b": "internvl-8b",
+    "internv1-4b": "internvl-4b",
+    "internv1-2b": "internvl-2b",
+    "internv1-1b": "internvl-1b",
+}
+
 
 class LlmModelUpdateRequest(BaseModel):
     model: str
@@ -506,9 +514,13 @@ def _finalize_rag_llm_pipeline(
 
 
 def _set_llm_model(app: FastAPI, model_name: str) -> None:
-    selected = model_name.strip()
+    selected = model_name.strip().lower()
     if not selected:
         raise ValueError("Model name must not be empty")
+    normalized = LLM_MODEL_ALIASES.get(selected, selected)
+    if normalized != selected:
+        logger.info("Normalized LLM model alias: %s -> %s", selected, normalized)
+    selected = normalized
     app.state.llm_client = get_llm_client(selected)
     app.state.llm_service = LlmService(client=app.state.llm_client)
     app.state.llm_model = selected

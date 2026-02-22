@@ -5,6 +5,7 @@ import contextlib
 import logging
 import math
 import os
+import threading
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -44,6 +45,20 @@ def _patch_linspace_for_meta():
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def _as_token_id(value):
+    """Normalize token id value to int or None."""
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        value = value[0]
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def build_transform(input_size: int):
@@ -162,6 +177,7 @@ class InternVLClient(BaseLLMClient):
 
         self._model = None
         self._tokenizer = None
+        self._load_lock = threading.Lock()
 
     def _get_torch_dtype(self):
         """Convert string dtype to torch dtype."""
@@ -210,57 +226,122 @@ class InternVLClient(BaseLLMClient):
 
     def _load_model(self):
         """Lazy load model and tokenizer."""
-        if self._model is not None:
+        if self._model is not None and self._tokenizer is not None:
             return
 
-        from transformers import AutoModel, AutoTokenizer
-        from transformers.utils import logging as hf_logging
+        with self._load_lock:
+            if self._model is not None and self._tokenizer is not None:
+                return
 
-        hf_logging.set_verbosity_error()
+            from transformers import AutoModel, AutoTokenizer
+            from transformers.utils import logging as hf_logging
 
-        # Loading InternVL model
+            hf_logging.set_verbosity_error()
 
-        model_name = self.model_path.split('/')[-1]
-        torch_dtype = self._get_torch_dtype()
+            model_name = self.model_path.split('/')[-1]
+            torch_dtype = self._get_torch_dtype()
 
-        torch.set_grad_enabled(False)
+            torch.set_grad_enabled(False)
 
-        # InternVL custom code calls .item() during __init__,
-        # which fails with meta tensors when low_cpu_mem_usage=True
-        load_kwargs = dict(
-            torch_dtype=torch_dtype,
-            low_cpu_mem_usage=False,
-            trust_remote_code=True,
+            # InternVL custom code calls .item() during __init__,
+            # which fails with meta tensors when low_cpu_mem_usage=True
+            load_kwargs = dict(
+                torch_dtype=torch_dtype,
+                low_cpu_mem_usage=False,
+                trust_remote_code=True,
+            )
+
+            if self.num_gpus > 1:
+                load_kwargs["device_map"] = self._split_model(model_name)
+
+            model = None
+            tokenizer = None
+            try:
+                with _patch_linspace_for_meta():
+                    model = AutoModel.from_pretrained(
+                        self.model_path, **load_kwargs
+                    ).eval()
+
+                if self.num_gpus <= 1:
+                    model = model.to(self.device)
+
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self.model_path,
+                    trust_remote_code=True,
+                    use_fast=False
+                )
+                if tokenizer is None:
+                    raise RuntimeError(f"Tokenizer loading returned None for model={self.model_path}")
+
+                eos_id = _as_token_id(tokenizer.eos_token_id)
+                pad_id = _as_token_id(tokenizer.pad_token_id)
+                if pad_id is None and eos_id is not None:
+                    pad_id = eos_id
+                    tokenizer.pad_token_id = eos_id
+
+                if eos_id is None:
+                    try:
+                        eos_id = _as_token_id(getattr(model.generation_config, "eos_token_id", None))
+                    except Exception:
+                        eos_id = None
+                if pad_id is None and eos_id is not None:
+                    pad_id = eos_id
+                    tokenizer.pad_token_id = eos_id
+
+                try:
+                    if pad_id is not None:
+                        model.generation_config.pad_token_id = pad_id
+                    if eos_id is not None:
+                        model.generation_config.eos_token_id = eos_id
+                except Exception:
+                    pass
+
+                self._model = model
+                self._tokenizer = tokenizer
+            except Exception:
+                self._model = None
+                self._tokenizer = None
+                raise
+
+    def _generation_config(self, *, max_new_tokens: int) -> dict:
+        if self._tokenizer is None or self._model is None:
+            raise RuntimeError(
+                f"InternVL model/tokenizer is not initialized for {self.model_path}. "
+                "Check model name and HF cache/network."
+            )
+        eos_id = _as_token_id(self._tokenizer.eos_token_id)
+        pad_id = _as_token_id(self._tokenizer.pad_token_id)
+        if eos_id is None:
+            eos_id = _as_token_id(getattr(getattr(self._model, "generation_config", None), "eos_token_id", None))
+        if pad_id is None:
+            pad_id = eos_id
+
+        cfg = {
+            "max_new_tokens": int(max_new_tokens),
+            "do_sample": False,
+        }
+        if pad_id is not None:
+            cfg["pad_token_id"] = pad_id
+        if eos_id is not None:
+            cfg["eos_token_id"] = eos_id
+        return cfg
+
+    def build_report_payload(
+        self,
+        image_path: str,
+        category: str,
+        ad_info: Optional[Dict] = None,
+        few_shot_paths: Optional[List[str]] = None,
+    ) -> dict:
+        payload = super().build_report_payload(
+            image_path,
+            category,
+            ad_info,
+            few_shot_paths=few_shot_paths,
         )
-
-        if self.num_gpus > 1:
-            load_kwargs["device_map"] = self._split_model(model_name)
-
-        with _patch_linspace_for_meta():
-            self._model = AutoModel.from_pretrained(
-                self.model_path, **load_kwargs
-            ).eval()
-
-        if self.num_gpus <= 1:
-            self._model = self._model.to(self.device)
-
-        self._tokenizer = AutoTokenizer.from_pretrained(
-            self.model_path,
-            trust_remote_code=True,
-            use_fast=False
-        )
-        if self._tokenizer.pad_token_id is None and self._tokenizer.eos_token_id is not None:
-            self._tokenizer.pad_token_id = self._tokenizer.eos_token_id
-
-        try:
-            eos_id = self._tokenizer.eos_token_id
-            if eos_id is not None:
-                self._model.generation_config.pad_token_id = eos_id
-                self._model.generation_config.eos_token_id = eos_id
-        except Exception:
-            pass
-
-        # Model loaded
+        # Report JSON often truncates with 128 tokens; use larger cap for stable parse.
+        payload["max_new_tokens"] = max(int(self.max_new_tokens), 512)
+        return payload
 
     def build_payload(
         self,
@@ -322,11 +403,8 @@ class InternVLClient(BaseLLMClient):
         num_patches_list = [img.shape[0] for img in images]
 
         # Generate
-        generation_config = dict(
-            max_new_tokens=self.max_new_tokens,
-            do_sample=False,
-            pad_token_id=self._tokenizer.eos_token_id,
-            eos_token_id=self._tokenizer.eos_token_id,
+        generation_config = self._generation_config(
+            max_new_tokens=int(payload.get("max_new_tokens", self.max_new_tokens))
         )
 
         response, _ = self._model.chat(
@@ -398,12 +476,7 @@ class InternVLClient(BaseLLMClient):
         predicted_answers = []
         history = None
 
-        generation_config = dict(
-            max_new_tokens=self.max_new_tokens,
-            do_sample=False,
-            pad_token_id=self._tokenizer.eos_token_id,
-            eos_token_id=self._tokenizer.eos_token_id,
-        )
+        generation_config = self._generation_config(max_new_tokens=self.max_new_tokens)
 
         for i in range(len(questions)):
             part_questions = questions[i:i + 1]
@@ -483,12 +556,7 @@ class InternVLClient(BaseLLMClient):
         for q in questions:
             prompt += q["text"] + "\n"
 
-        generation_config = dict(
-            max_new_tokens=self.max_new_tokens * len(questions),
-            do_sample=False,
-            pad_token_id=self._tokenizer.eos_token_id,
-            eos_token_id=self._tokenizer.eos_token_id,
-        )
+        generation_config = self._generation_config(max_new_tokens=self.max_new_tokens * len(questions))
 
         # Single model call for all questions
         response, _ = self._model.chat(

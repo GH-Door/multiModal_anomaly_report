@@ -6,6 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import psycopg2
+from psycopg2 import errorcodes
 from psycopg2.extras import Json, RealDictCursor
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,12 @@ CREATE INDEX IF NOT EXISTS idx_reports_pipeline_status ON inspection_reports(pip
 """
 
 ALTER_REPORT_COLUMNS_SQL = [
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS dataset VARCHAR(50);",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS category VARCHAR(100);",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS line VARCHAR(50);",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS ad_score FLOAT;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS ad_decision VARCHAR(20);",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS is_anomaly_ad BOOLEAN;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS has_defect BOOLEAN;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS region TEXT;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS bbox JSONB;",
@@ -81,7 +87,18 @@ ALTER_REPORT_COLUMNS_SQL = [
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS area_ratio FLOAT;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS confidence FLOAT;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS ingest_source_path TEXT;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS image_path TEXT;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS heatmap_path TEXT;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS mask_path TEXT;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS overlay_path TEXT;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS similar_image_path TEXT;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS ad_start_time TIMESTAMP;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS ad_inference_duration FLOAT;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS is_anomaly_llm BOOLEAN;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS llm_report JSONB;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS llm_summary JSONB;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS llm_start_time TIMESTAMP;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS llm_inference_duration FLOAT;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS applied_policy JSONB DEFAULT '{}'::jsonb;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS pipeline_status VARCHAR(30) DEFAULT 'processing';",
@@ -197,6 +214,18 @@ def _normalized_payload(data: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _existing_report_columns(conn: psycopg2.extensions.connection) -> set[str]:
+    sql = """
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'inspection_reports'
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        rows = cur.fetchall()
+    return {str(r[0]) for r in rows}
+
+
 def insert_report(conn: psycopg2.extensions.connection, data: Dict[str, Any]) -> int:
     """Insert a report row and return its id."""
     payload = _normalized_payload(data)
@@ -221,13 +250,34 @@ def update_report(conn: psycopg2.extensions.connection, report_id: int, data: Di
     if not payload:
         return
 
-    columns = list(payload.keys())
-    set_clause = ", ".join([f"{col} = %s" for col in columns] + ["updated_at = CURRENT_TIMESTAMP"])
-    sql = f"UPDATE inspection_reports SET {set_clause} WHERE id = %s"
+    attempted_drop_missing = False
+    while True:
+        columns = list(payload.keys())
+        if not columns:
+            return
 
-    with conn.cursor() as cur:
-        cur.execute(sql, [payload[c] for c in columns] + [report_id])
-    conn.commit()
+        set_clause = ", ".join([f"{col} = %s" for col in columns] + ["updated_at = CURRENT_TIMESTAMP"])
+        sql = f"UPDATE inspection_reports SET {set_clause} WHERE id = %s"
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, [payload[c] for c in columns] + [report_id])
+            conn.commit()
+            return
+        except psycopg2.Error as exc:
+            conn.rollback()
+            if exc.pgcode != errorcodes.UNDEFINED_COLUMN or attempted_drop_missing:
+                raise
+            existing = _existing_report_columns(conn)
+            dropped = [c for c in columns if c not in existing]
+            if not dropped:
+                raise
+            attempted_drop_missing = True
+            payload = {k: v for k, v in payload.items() if k in existing}
+            logger.warning(
+                "Dropped unknown DB columns during update_report(id=%s): %s",
+                report_id,
+                ", ".join(sorted(dropped)),
+            )
 
 
 def list_reports(conn: psycopg2.extensions.connection, limit: int = 50) -> List[Dict[str, Any]]:
