@@ -13,7 +13,14 @@ import torchvision.transforms as T
 from PIL import Image
 from torchvision.transforms.functional import InterpolationMode
 
-from .base import BaseLLMClient, INSTRUCTION, INSTRUCTION_WITH_AD, format_ad_info
+from .base import (
+    BaseLLMClient,
+    INSTRUCTION,
+    INSTRUCTION_WITH_AD,
+    REPORT_PROMPT,
+    REPORT_PROMPT_WITH_AD,
+    format_ad_info,
+)
 from src.utils.device import get_device
 
 logger = logging.getLogger(__name__)
@@ -333,15 +340,31 @@ class InternVLClient(BaseLLMClient):
         ad_info: Optional[Dict] = None,
         few_shot_paths: Optional[List[str]] = None,
     ) -> dict:
-        payload = super().build_report_payload(
-            image_path,
-            category,
-            ad_info,
-            few_shot_paths=few_shot_paths,
-        )
-        # Report JSON often truncates with 128 tokens; use larger cap for stable parse.
-        payload["max_new_tokens"] = max(int(self.max_new_tokens), 512)
-        return payload
+        refs = few_shot_paths or []
+        if ad_info:
+            prompt = REPORT_PROMPT_WITH_AD.format(category=category, ad_info=format_ad_info(ad_info)).strip()
+        else:
+            prompt = REPORT_PROMPT.format(category=category).strip()
+
+        # Report mode: do not include MCQ-style "Answer: A/B" instruction.
+        prompt += "\n"
+        if refs:
+            prompt += (
+                f"\nReference normal sample image(s): {len(refs)}\n"
+                "Use these only as baseline for visual comparison.\n"
+            )
+            for _ in refs:
+                prompt += "<image>\n"
+
+        prompt += "\nQuery image:\n<image>\n"
+
+        return {
+            "prompt": prompt,
+            "query_image": image_path,
+            "few_shot_paths": refs,
+            # Report JSON often truncates with small token limits.
+            "max_new_tokens": max(int(self.max_new_tokens), 512),
+        }
 
     def build_payload(
         self,
