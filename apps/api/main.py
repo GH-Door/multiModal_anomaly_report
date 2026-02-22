@@ -45,6 +45,9 @@ INCOMING_DEFAULT_CATEGORY = os.getenv("INCOMING_DEFAULT_CATEGORY", "")
 INCOMING_DEFAULT_LINE = os.getenv("INCOMING_DEFAULT_LINE", "LINE-A-01")
 INCOMING_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 PIPELINE_WORKERS = max(1, int(os.getenv("PIPELINE_WORKERS", "2")))
+LLM_LOCK_TIMEOUT_SEC = max(1.0, float(os.getenv("LLM_LOCK_TIMEOUT_SEC", "30")))
+PIPELINE_WATCHDOG_INTERVAL_SEC = max(2.0, float(os.getenv("PIPELINE_WATCHDOG_INTERVAL_SEC", "10")))
+PIPELINE_STALE_SECONDS = max(30, int(float(os.getenv("PIPELINE_STALE_SECONDS", "120"))))
 
 LINE_PATTERN = re.compile(r"(?i)line[_-]?([a-z0-9]+)")
 
@@ -342,6 +345,43 @@ def _has_llm_content(llm_response: dict[str, Any]) -> bool:
     return False
 
 
+def _safe_update_report(conn, report_id: int, payload: dict[str, Any], *, context: str) -> bool:
+    """Best-effort DB update with one rollback+retry for aborted transactions."""
+    try:
+        pg.update_report(conn, report_id, payload)
+        return True
+    except Exception:
+        logger.exception("Report update failed (%s) | report_id=%s", context, report_id)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            pg.update_report(conn, report_id, payload)
+            return True
+        except Exception:
+            logger.exception("Report update retry failed (%s) | report_id=%s", context, report_id)
+            return False
+
+
+def _mark_pipeline_failed(
+    conn,
+    *,
+    report_id: int,
+    stage: str,
+    error: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = dict(extra or {})
+    payload.update({
+        "ad_decision": "review_needed",
+        "pipeline_status": "failed",
+        "pipeline_stage": stage,
+        "pipeline_error": str(error)[:500],
+    })
+    _safe_update_report(conn, report_id, payload, context=f"mark_failed:{stage}")
+
+
 def _finalize_rag_llm_pipeline(
     app: FastAPI,
     *,
@@ -355,12 +395,17 @@ def _finalize_rag_llm_pipeline(
     ref_path: str | None = None
     try:
         if RAG_ENABLED:
-            pg.update_report(conn, report_id, {"pipeline_status": "processing", "pipeline_stage": "rag_running"})
+            _safe_update_report(
+                conn,
+                report_id,
+                {"pipeline_status": "processing", "pipeline_stage": "rag_running"},
+                context="rag_running",
+            )
 
             try:
                 rag_results = app.state.rag_service.search_closest_normal(ad_result["original_path"], model_category)
                 ref_path = rag_results[0]["path"] if rag_results else None
-                pg.update_report(
+                _safe_update_report(
                     conn,
                     report_id,
                     {
@@ -368,10 +413,11 @@ def _finalize_rag_llm_pipeline(
                         "pipeline_status": "processing",
                         "pipeline_stage": "rag_done",
                     },
+                    context="rag_done",
                 )
             except Exception as exc:
                 logger.exception("RAG stage failed for report_id=%s", report_id)
-                pg.update_report(
+                _safe_update_report(
                     conn,
                     report_id,
                     {
@@ -379,13 +425,40 @@ def _finalize_rag_llm_pipeline(
                         "pipeline_stage": "rag_failed",
                         "pipeline_error": f"RAG: {str(exc)[:500]}",
                     },
+                    context="rag_failed",
                 )
         else:
-            pg.update_report(conn, report_id, {"pipeline_status": "processing", "pipeline_stage": "rag_skipped"})
+            _safe_update_report(
+                conn,
+                report_id,
+                {"pipeline_status": "processing", "pipeline_stage": "rag_skipped"},
+                context="rag_skipped",
+            )
 
-        pg.update_report(conn, report_id, {"pipeline_status": "processing", "pipeline_stage": "llm_running"})
+        _safe_update_report(
+            conn,
+            report_id,
+            {"pipeline_status": "processing", "pipeline_stage": "llm_waiting_lock"},
+            context="llm_waiting_lock",
+        )
         llm_started = datetime.now()
-        with app.state.llm_lock:
+        acquired = app.state.llm_lock.acquire(timeout=LLM_LOCK_TIMEOUT_SEC)
+        if not acquired:
+            _mark_pipeline_failed(
+                conn,
+                report_id=report_id,
+                stage="llm_lock_timeout",
+                error=f"LLM lock wait timeout ({LLM_LOCK_TIMEOUT_SEC:.1f}s)",
+            )
+            return
+
+        try:
+            _safe_update_report(
+                conn,
+                report_id,
+                {"pipeline_status": "processing", "pipeline_stage": "llm_running"},
+                context="llm_running",
+            )
             llm_response = app.state.llm_service.generate_dynamic_report(
                 ad_result["original_path"],
                 ref_path,
@@ -393,23 +466,21 @@ def _finalize_rag_llm_pipeline(
                 {**ad_result, "ad_decision": ad_decision},
                 policy,
             )
+        finally:
+            app.state.llm_lock.release()
 
         if not _has_llm_content(llm_response):
-            pg.update_report(
+            _mark_pipeline_failed(
                 conn,
-                report_id,
-                {
-                    **llm_response,
-                    "ad_decision": "review_needed",
-                    "pipeline_status": "failed",
-                    "pipeline_stage": "llm_empty",
-                    "pipeline_error": "LLM returned empty/invalid content",
-                },
+                report_id=report_id,
+                stage="llm_empty",
+                error="LLM returned empty/invalid content",
+                extra=llm_response,
             )
             return
 
         llm_decision = _final_decision_from_llm(llm_response)
-        pg.update_report(
+        _safe_update_report(
             conn,
             report_id,
             {
@@ -420,22 +491,16 @@ def _finalize_rag_llm_pipeline(
                 "pipeline_stage": "llm_done",
                 "pipeline_error": None,
             },
+            context="llm_done",
         )
     except Exception as exc:
         logger.exception("LLM stage failed for report_id=%s", report_id)
-        try:
-            pg.update_report(
-                conn,
-                report_id,
-                {
-                    "ad_decision": "review_needed",
-                    "pipeline_status": "failed",
-                    "pipeline_stage": "llm_failed",
-                    "pipeline_error": f"LLM: {str(exc)[:500]}",
-                },
-            )
-        except Exception:
-            logger.exception("Failed to mark pipeline failure for report_id=%s", report_id)
+        _mark_pipeline_failed(
+            conn,
+            report_id=report_id,
+            stage="llm_failed",
+            error=f"LLM: {str(exc)[:500]}",
+        )
     finally:
         conn.close()
 
@@ -835,6 +900,19 @@ def _scan_incoming_once(app: FastAPI) -> int:
         conn.close()
 
 
+def _mark_stale_pipelines_once() -> int:
+    conn = pg.connect_fast(DATABASE_URL)
+    try:
+        updated = pg.mark_stale_processing_reports(
+            conn,
+            stale_seconds=PIPELINE_STALE_SECONDS,
+            limit=1000,
+        )
+        return int(updated)
+    finally:
+        conn.close()
+
+
 async def _incoming_watch_loop(app: FastAPI) -> None:
     logger.info(
         "Incoming watcher enabled | root=%s | interval=%.1fs | stable=%.1fs",
@@ -853,6 +931,27 @@ async def _incoming_watch_loop(app: FastAPI) -> None:
             logger.exception("Incoming watcher loop failed")
 
         await asyncio.sleep(max(1.0, INCOMING_SCAN_INTERVAL_SEC))
+
+
+async def _pipeline_watchdog_loop() -> None:
+    logger.info(
+        "Pipeline watchdog enabled | interval=%.1fs | stale_after=%ds",
+        PIPELINE_WATCHDOG_INTERVAL_SEC,
+        PIPELINE_STALE_SECONDS,
+    )
+    while True:
+        try:
+            updated = await run_in_threadpool(_mark_stale_pipelines_once)
+            if updated > 0:
+                logger.warning(
+                    "Pipeline watchdog marked %d stale report(s) as failed",
+                    updated,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Pipeline watchdog loop failed")
+        await asyncio.sleep(PIPELINE_WATCHDOG_INTERVAL_SEC)
 
 
 @asynccontextmanager
@@ -875,6 +974,7 @@ async def lifespan(app: FastAPI):
     app.state.incoming_unresolved = set()
 
     incoming_task: asyncio.Task | None = None
+    watchdog_task: asyncio.Task | None = asyncio.create_task(_pipeline_watchdog_loop())
     if INCOMING_WATCH_ENABLED:
         INCOMING_ROOT.mkdir(parents=True, exist_ok=True)
         incoming_task = asyncio.create_task(_incoming_watch_loop(app))
@@ -886,6 +986,12 @@ async def lifespan(app: FastAPI):
             incoming_task.cancel()
             try:
                 await incoming_task
+            except asyncio.CancelledError:
+                pass
+        if watchdog_task is not None:
+            watchdog_task.cancel()
+            try:
+                await watchdog_task
             except asyncio.CancelledError:
                 pass
         try:
@@ -942,6 +1048,9 @@ async def get_incoming_status():
         "scan_interval_sec": INCOMING_SCAN_INTERVAL_SEC,
         "stable_seconds": INCOMING_STABLE_SECONDS,
         "pipeline_workers": PIPELINE_WORKERS,
+        "llm_lock_timeout_sec": LLM_LOCK_TIMEOUT_SEC,
+        "pipeline_watchdog_interval_sec": PIPELINE_WATCHDOG_INTERVAL_SEC,
+        "pipeline_stale_seconds": PIPELINE_STALE_SECONDS,
         "rag_enabled": RAG_ENABLED,
         "default_dataset": INCOMING_DEFAULT_DATASET,
         "default_category": INCOMING_DEFAULT_CATEGORY,

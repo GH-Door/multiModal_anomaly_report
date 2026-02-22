@@ -373,3 +373,41 @@ def get_category_policy(conn: psycopg2.extensions.connection, category: str) -> 
         **dict(DEFAULT_POLICY),
         "source": "default",
     }
+
+
+def mark_stale_processing_reports(
+    conn: psycopg2.extensions.connection,
+    *,
+    stale_seconds: int,
+    limit: int = 1000,
+) -> int:
+    """Mark long-running processing rows as failed to avoid infinite UI pending state."""
+    stale_seconds = int(stale_seconds)
+    if stale_seconds <= 0:
+        return 0
+
+    sql = """
+    WITH stale AS (
+      SELECT id
+      FROM inspection_reports
+      WHERE pipeline_status = 'processing'
+        AND COALESCE(updated_at, created_at) < (CURRENT_TIMESTAMP - (%s * INTERVAL '1 second'))
+      ORDER BY COALESCE(updated_at, created_at) ASC
+      LIMIT %s
+    )
+    UPDATE inspection_reports r
+       SET pipeline_status = 'failed',
+           pipeline_stage = 'timeout',
+           pipeline_error = COALESCE(NULLIF(r.pipeline_error, ''), %s),
+           ad_decision = COALESCE(NULLIF(r.ad_decision, ''), 'review_needed'),
+           updated_at = CURRENT_TIMESTAMP
+      FROM stale
+     WHERE r.id = stale.id
+    RETURNING r.id
+    """
+    timeout_msg = f"PIPELINE TIMEOUT: processing exceeded {stale_seconds}s"
+    with conn.cursor() as cur:
+        cur.execute(sql, (stale_seconds, int(limit), timeout_msg))
+        rows = cur.fetchall()
+    conn.commit()
+    return len(rows)
