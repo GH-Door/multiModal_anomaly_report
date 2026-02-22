@@ -72,6 +72,16 @@ class LocalImageUpload:
             pass
 
 
+class CachedStaticFiles(StaticFiles):
+    """Static file mount with cache headers for immutable output filenames."""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):  # type: ignore[override]
+        response = super().file_response(full_path, stat_result, scope, status_code=status_code)
+        if getattr(response, "status_code", 0) == 200:
+            response.headers.setdefault("Cache-Control", "public, max-age=604800, immutable")
+        return response
+
+
 def _set_llm_model(app: FastAPI, model_name: str) -> None:
     selected = model_name.strip()
     if not selected:
@@ -79,6 +89,28 @@ def _set_llm_model(app: FastAPI, model_name: str) -> None:
     app.state.llm_client = get_llm_client(selected)
     app.state.llm_service = LlmService(client=app.state.llm_client)
     app.state.llm_model = selected
+
+
+def _checkpoint_exists_for_category_key(category_key: str) -> bool:
+    key = category_key.strip().strip("/")
+    if not key:
+        return False
+
+    roots = [CHECKPOINT_DIR / "Patchcore", CHECKPOINT_DIR]
+    seen: set[Path] = set()
+    for root in roots:
+        if root in seen or not root.exists():
+            continue
+        seen.add(root)
+
+        category_dir = root / key
+        if category_dir.exists() and category_dir.is_dir():
+            for v_dir in category_dir.iterdir():
+                if not v_dir.is_dir() or not v_dir.name.startswith("v"):
+                    continue
+                if (v_dir / "model.ckpt").exists():
+                    return True
+    return False
 
 
 def _resolve_model_category(dataset: str, category: str) -> str:
@@ -91,8 +123,7 @@ def _resolve_model_category(dataset: str, category: str) -> str:
     ds = dataset.strip().strip("/")
     if ds:
         candidate = f"{ds}/{selected}"
-        ckpt_path = CHECKPOINT_DIR / candidate / "v0" / "model.ckpt"
-        if ckpt_path.exists():
+        if _checkpoint_exists_for_category_key(candidate):
             return candidate
     return selected
 
@@ -177,60 +208,104 @@ def _run_inspection_pipeline(
     line: str,
     ingest_source_path: str | None,
 ) -> dict[str, Any]:
+    model_category = _resolve_model_category(dataset=dataset, category=category)
+    policy = pg.get_category_policy(conn, model_category)
+    t_low = float(policy.get("t_low", 0.5))
+    t_high = float(policy.get("t_high", 0.8))
+    policy_source = str(policy.get("source", "default"))
+
+    if hasattr(file_obj, "file"):
+        file_obj.file.seek(0)
+
+    ad_start_time = datetime.now()
+    # GPU/model access is serialized for stability; downstream RAG/LLM stays concurrent.
     with app.state.inspect_lock:
-        model_category = _resolve_model_category(dataset=dataset, category=category)
-        policy = pg.get_category_policy(conn, model_category)
-        t_low = float(policy.get("t_low", 0.5))
-        t_high = float(policy.get("t_high", 0.8))
-
-        if hasattr(file_obj, "file"):
-            file_obj.file.seek(0)
-
-        ad_start_time = datetime.now()
         ad_results = app.state.ad_service.predict_batch(
             [file_obj],
             category=model_category,
             dataset=dataset,
             threshold=t_low,
         )
-        ad_result = ad_results[0]
-        score = float(ad_result["ad_score"])
+    ad_result = ad_results[0]
+    score = float(ad_result["ad_score"])
+    model_thr = float(ad_result.get("model_threshold", t_low))
+    model_is_anomaly = bool(ad_result.get("model_is_anomaly", score > model_thr))
 
-        if score < t_low:
-            ad_decision = "normal"
-        elif score > t_high:
-            ad_decision = "anomaly"
-        else:
-            ad_decision = "review_needed"
+    # category metadata가 없으면 run_ad_inference 기본 흐름처럼
+    # model threshold 중심의 review band를 사용한다.
+    if policy_source != "category_metadata":
+        center = max(0.0, min(1.0, model_thr))
+        band = 0.08
+        t_low = max(0.0, center - band)
+        t_high = min(1.0, center + band)
 
-        initial_data = {
-            "dataset": dataset,
-            "category": model_category,
-            "line": line,
-            "ad_score": score,
-            "ad_decision": ad_decision,
-            "is_anomaly_ad": score > t_high,
-            "has_defect": ad_result.get("has_defect", False),
-            "region": ad_result.get("region"),
-            "area_ratio": ad_result.get("area_ratio"),
-            "bbox": ad_result.get("bbox"),
-            "center": ad_result.get("center"),
-            "confidence": ad_result.get("confidence"),
-            "ingest_source_path": ingest_source_path,
-            "image_path": ad_result["original_path"],
-            "heatmap_path": ad_result["heatmap_path"],
-            "mask_path": ad_result["mask_path"],
-            "overlay_path": ad_result["overlay_path"],
-            "created_at": ad_start_time,
-            "ad_inference_duration": (datetime.now() - ad_start_time).total_seconds(),
-            "applied_policy": policy,
-        }
-        report_id = pg.insert_report(conn, initial_data)
+    # 정책 파일이 잘못 들어간 경우(all anomaly/normal 쏠림) 방어.
+    if t_high <= t_low or not (0.0 <= t_low <= 1.0 and 0.0 <= t_high <= 1.0):
+        logger.warning(
+            "Invalid policy band for %s (t_low=%.4f, t_high=%.4f). source=%s fallback to model threshold band.",
+            model_category,
+            t_low,
+            t_high,
+            policy_source,
+        )
+        center = max(0.0, min(1.0, model_thr))
+        t_low = max(0.0, center - 0.05)
+        t_high = min(1.0, center + 0.05)
 
+    if score < t_low:
+        ad_decision = "normal"
+    elif score > t_high:
+        ad_decision = "anomaly"
+    else:
+        ad_decision = "review_needed"
+
+    logger.info(
+        "AD decision | category=%s score=%.4f band=[%.4f, %.4f] source=%s model_thr=%.4f model_is_anomaly=%s decision=%s",
+        model_category,
+        score,
+        t_low,
+        t_high,
+        policy_source,
+        model_thr,
+        model_is_anomaly,
+        ad_decision,
+    )
+
+    initial_data = {
+        "dataset": dataset,
+        "category": model_category,
+        "line": line,
+        "ad_score": score,
+        "ad_decision": ad_decision,
+        "is_anomaly_ad": score > t_high,
+        "has_defect": ad_result.get("has_defect", False),
+        "region": ad_result.get("region"),
+        "area_ratio": ad_result.get("area_ratio"),
+        "bbox": ad_result.get("bbox"),
+        "center": ad_result.get("center"),
+        "confidence": ad_result.get("confidence"),
+        "ingest_source_path": ingest_source_path,
+        "image_path": ad_result["original_path"],
+        "heatmap_path": ad_result["heatmap_path"],
+        "mask_path": ad_result["mask_path"],
+        "overlay_path": ad_result["overlay_path"],
+        "created_at": ad_start_time,
+        "ad_inference_duration": (datetime.now() - ad_start_time).total_seconds(),
+        "applied_policy": policy,
+    }
+    report_id = pg.insert_report(conn, initial_data)
+
+    warnings: list[str] = []
+    ref_path = None
+    try:
         rag_results = app.state.rag_service.search_closest_normal(ad_result["original_path"], model_category)
         ref_path = rag_results[0]["path"] if rag_results else None
         pg.update_report(conn, report_id, {"similar_image_path": ref_path})
+    except Exception:
+        logger.exception("RAG stage failed for report_id=%s", report_id)
+        warnings.append("rag_failed")
 
+    try:
         llm_response = app.state.llm_service.generate_dynamic_report(
             ad_result["original_path"],
             ref_path,
@@ -239,14 +314,18 @@ def _run_inspection_pipeline(
             policy,
         )
         pg.update_report(conn, report_id, llm_response)
+    except Exception:
+        logger.exception("LLM stage failed for report_id=%s", report_id)
+        warnings.append("llm_failed")
 
-        return {
-            "status": "success",
-            "report_id": report_id,
-            "ad_decision": ad_decision,
-            "category": model_category,
-            "source_image": ingest_source_path,
-        }
+    return {
+        "status": "success",
+        "report_id": report_id,
+        "ad_decision": ad_decision,
+        "category": model_category,
+        "source_image": ingest_source_path,
+        "warnings": warnings,
+    }
 
 
 def _run_single_inspection(
@@ -257,7 +336,7 @@ def _run_single_inspection(
     line: str,
     ingest_source_path: str | None,
 ) -> dict[str, Any]:
-    conn = pg.connect(DATABASE_URL)
+    conn = pg.connect_fast(DATABASE_URL)
     try:
         return _run_inspection_pipeline(
             app,
@@ -276,7 +355,7 @@ def _scan_incoming_once(app: FastAPI) -> int:
     if not INCOMING_ROOT.exists():
         return 0
 
-    conn = pg.connect(DATABASE_URL)
+    conn = pg.connect_fast(DATABASE_URL)
     processed = 0
     try:
         for image_path in _collect_incoming_images(INCOMING_ROOT):
@@ -350,7 +429,7 @@ async def _incoming_watch_loop(app: FastAPI) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Boot-time DB connectivity and additive migrations
-    bootstrap_conn = pg.connect(DATABASE_URL)
+    bootstrap_conn = pg.connect(DATABASE_URL, ensure_schema=True)
     bootstrap_conn.close()
 
     app.state.ad_service = AdService(
@@ -389,7 +468,7 @@ app.add_middleware(
 )
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR), check_dir=False), name="outputs")
+app.mount("/outputs", CachedStaticFiles(directory=str(OUTPUT_DIR), check_dir=False), name="outputs")
 app.mount("/data/datasets", StaticFiles(directory=str(DATA_DIR), check_dir=False), name="datasets")
 
 
@@ -464,12 +543,22 @@ async def get_reports(
     category: Optional[str] = Query(None),
     decision: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
-    page_size: int = Query(5000, ge=1, le=5000),
+    page_size: int = Query(500, ge=1, le=5000),
+    limit: Optional[int] = Query(None, ge=1, le=5000),
+    offset: Optional[int] = Query(None, ge=0),
+    include_full: bool = Query(False),
 ):
     """Fetch reports in the same shape expected by current frontend."""
-    offset = (page - 1) * page_size
+    if limit is not None or offset is not None:
+        effective_limit = int(limit or page_size)
+        effective_offset = int(offset or 0)
+        effective_page = (effective_offset // max(1, effective_limit)) + 1
+    else:
+        effective_limit = int(page_size)
+        effective_offset = (page - 1) * page_size
+        effective_page = int(page)
 
-    conn = pg.connect(DATABASE_URL)
+    conn = pg.connect_fast(DATABASE_URL)
     try:
         total = pg.count_filtered_reports(
             conn,
@@ -480,8 +569,9 @@ async def get_reports(
             conn,
             category=category,
             decision=decision,
-            limit=page_size,
-            offset=offset,
+            limit=effective_limit,
+            offset=effective_offset,
+            include_full=include_full,
         )
     except Exception as exc:
         logger.exception("Report list fetch failed")
@@ -490,8 +580,9 @@ async def get_reports(
         conn.close()
 
     return {
-        "page": page,
-        "page_size": page_size,
+        "page": effective_page,
+        "page_size": effective_limit,
+        "offset": effective_offset,
         "total_count": total,
         "total": total,
         "items": reports,

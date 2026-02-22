@@ -25,7 +25,13 @@ function ImagePanel({ caseData, active }: { caseData: AnomalyCase; active: Image
   return (
     <div className="bg-gray-100 rounded-lg aspect-[4/3] overflow-hidden mb-4 flex items-center justify-center">
       {url ? (
-        <img src={url} alt={`${active}`} className="w-full h-full object-contain" />
+        <img
+          src={url}
+          alt={`${active}`}
+          className="w-full h-full object-contain"
+          loading="lazy"
+          decoding="async"
+        />
       ) : (
         <div className="text-gray-400 flex flex-col items-center">
           <Loader2 className="w-6 h-6 animate-spin mb-2" />

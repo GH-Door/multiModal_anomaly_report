@@ -36,8 +36,8 @@ const DEFAULT_NOTI: NotificationSettings = {
 
 const REPORT_CASES_OPTIONS = {
   query: {},
-  pageSize: 500,
-  maxItems: 5000,
+  pageSize: 250,
+  maxItems: 1000,
 };
 
 const MODEL_STORAGE_OPTIONS = {

@@ -54,6 +54,7 @@ async function fetchReportsRaw(query: ReportListQuery, opts?: { signal?: AbortSi
   return apiRequest<unknown>(REPORTS_PATH, {
     query: query as QueryParams,
     signal: opts?.signal,
+    timeoutMs: 45000,
   });
 }
 

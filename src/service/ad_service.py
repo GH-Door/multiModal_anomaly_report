@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import cv2
 import numpy as np
 import torch
+import yaml
 from PIL import Image
-from torchvision import transforms
 
 logger = logging.getLogger(__name__)
 
@@ -29,24 +30,128 @@ class AdService:
         self.output_root = Path(output_root)
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.model_cache: Dict[str, Any] = {}
+        self.input_size = self._resolve_input_size()
 
-        self.transform = transforms.Compose(
-            [
-                transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ]
+    @staticmethod
+    def _to_float(value: Any, default: float) -> float:
+        try:
+            if isinstance(value, torch.Tensor):
+                return float(value.detach().cpu().item())
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _resolve_input_size(self) -> Tuple[int, int]:
+        default_size = (384, 384)
+
+        raw_env = os.getenv("AD_INPUT_SIZE", "").strip()
+        if raw_env:
+            parts = [p for p in raw_env.replace("x", ",").split(",") if p.strip()]
+            if len(parts) == 2:
+                try:
+                    h = int(parts[0].strip())
+                    w = int(parts[1].strip())
+                    if h > 0 and w > 0:
+                        return (h, w)
+                except ValueError:
+                    logger.warning("Invalid AD_INPUT_SIZE=%s, fallback to config/default", raw_env)
+
+        cfg_path = Path(
+            os.getenv(
+                "ANOMALY_CONFIG_PATH",
+                str(Path(__file__).resolve().parents[2] / "configs" / "anomaly.yaml"),
+            )
         )
+        try:
+            if cfg_path.exists():
+                with cfg_path.open("r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                image_size = (cfg.get("data") or {}).get("image_size")
+                if (
+                    isinstance(image_size, (list, tuple))
+                    and len(image_size) == 2
+                    and int(image_size[0]) > 0
+                    and int(image_size[1]) > 0
+                ):
+                    return (int(image_size[0]), int(image_size[1]))
+        except Exception:
+            logger.exception("Failed to read anomaly config image_size from %s", cfg_path)
+
+        return default_size
+
+    def _preprocess(self, image: Image.Image) -> torch.Tensor:
+        """Match existing PatchCore script path: resize -> RGB float [0,1] -> CHW tensor."""
+        np_img = np.asarray(image, dtype=np.uint8)
+        h, w = self.input_size
+        resized = cv2.resize(np_img, (w, h), interpolation=cv2.INTER_LINEAR)
+        tensor = torch.from_numpy((resized.astype(np.float32) / 255.0).transpose(2, 0, 1))
+        return tensor
+
+    def _iter_checkpoint_roots(self) -> List[Path]:
+        patchcore_dir = self.checkpoint_dir / "Patchcore"
+        if patchcore_dir.exists():
+            return [patchcore_dir, self.checkpoint_dir]
+        return [self.checkpoint_dir]
+
+    @staticmethod
+    def _select_latest_ckpt(category_dir: Path) -> Path | None:
+        if not category_dir.exists() or not category_dir.is_dir():
+            return None
+
+        versions: List[Tuple[int, Path]] = []
+        for v_dir in category_dir.iterdir():
+            if not v_dir.is_dir() or not v_dir.name.startswith("v"):
+                continue
+            try:
+                version = int(v_dir.name[1:])
+            except ValueError:
+                continue
+            ckpt = v_dir / "model.ckpt"
+            if ckpt.exists():
+                versions.append((version, ckpt))
+        if not versions:
+            return None
+        return max(versions, key=lambda x: x[0])[1]
+
+    def _find_checkpoint(self, category_key: str) -> Tuple[Path, str] | None:
+        key = category_key.strip().strip("/")
+        if not key:
+            return None
+
+        if "/" in key:
+            candidates: List[str] = [key]
+        else:
+            candidates = [key]
+
+        for root in self._iter_checkpoint_roots():
+            for cand in candidates:
+                ckpt = self._select_latest_ckpt(root / cand)
+                if ckpt is not None:
+                    return ckpt, cand
+
+            # category only key일 때 root/*/{category}/v*/model.ckpt 탐색
+            if "/" not in key:
+                ds_dirs = sorted(
+                    [d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")],
+                    key=lambda p: p.name,
+                ) if root.exists() else []
+                for ds_dir in ds_dirs:
+                    if not ds_dir.is_dir() or ds_dir.name.startswith("."):
+                        continue
+                    ckpt = self._select_latest_ckpt(ds_dir / key)
+                    if ckpt is not None:
+                        return ckpt, f"{ds_dir.name}/{key}"
+        return None
 
     def get_model(self, dataset: str, category: str):
         del dataset  # kept for API compatibility
-        model_path = self.checkpoint_dir / category / "v0" / "model.ckpt"
+        found = self._find_checkpoint(category)
+        if found is None:
+            raise FileNotFoundError(f"Model not found for category key: {category}")
+        model_path, resolved_key = found
         model_key = str(model_path)
         if model_key in self.model_cache:
             return self.model_cache[model_key]
-        if not model_path.exists():
-            raise FileNotFoundError(f"Model not found: {model_path}")
 
         from anomalib.models import Patchcore
 
@@ -77,6 +182,7 @@ class AdService:
         model.eval()
         model.to(self.device)
         self.model_cache[model_key] = model
+        logger.info("Loaded AD checkpoint: %s (resolved_category=%s)", model_path, resolved_key)
         return model
 
     @torch.no_grad()
@@ -95,7 +201,7 @@ class AdService:
         for f in upload_files:
             req_id = str(uuid.uuid4())[:8]
             img = Image.open(f.file).convert("RGB")
-            inputs.append(self.transform(img))
+            inputs.append(self._preprocess(img))
             originals.append(img)
             request_ids.append(req_id)
 
@@ -111,11 +217,25 @@ class AdService:
         if hasattr(outputs, "anomaly_map") and hasattr(outputs, "pred_score"):
             batch_maps = outputs.anomaly_map
             batch_scores = outputs.pred_score
+            batch_labels = getattr(outputs, "pred_label", None)
         elif isinstance(outputs, (list, tuple)):
             batch_maps, batch_scores = outputs
+            batch_labels = None
         else:
             batch_maps = outputs
             batch_scores = outputs.view(len(upload_files), -1).max(dim=1).values
+            batch_labels = None
+
+        # run_ad_inference와 동일하게 image threshold를 위치 추정에도 사용한다.
+        map_threshold = float(threshold)
+        score_threshold = float(threshold)
+        post = getattr(model, "post_processor", None)
+        if post is not None:
+            if hasattr(post, "normalized_image_threshold"):
+                score_threshold = self._to_float(getattr(post, "normalized_image_threshold"), score_threshold)
+            elif hasattr(post, "image_threshold"):
+                score_threshold = self._to_float(getattr(post, "image_threshold"), score_threshold)
+        map_threshold = score_threshold
 
         results: List[Dict[str, Any]] = []
         for i in range(len(upload_files)):
@@ -123,14 +243,20 @@ class AdService:
             amap = cv2.GaussianBlur(amap, (3, 3), 0)
 
             w_orig, h_orig = originals[i].size
-            amap_resized = cv2.resize(amap, (224, 224))
-            amap_final = cv2.resize(amap_resized, (w_orig, h_orig))
+            if amap.shape != (h_orig, w_orig):
+                amap_final = cv2.resize(amap, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+            else:
+                amap_final = amap
 
             orig_path = self.output_root / f"orig_{request_ids[i]}.png"
             heatmap_path = self.output_root / f"heat_{request_ids[i]}.png"
             mask_path = self.output_root / f"mask_{request_ids[i]}.png"
             overlay_path = self.output_root / f"overlay_{request_ids[i]}.png"
             score = round(float(batch_scores[i].cpu().item()), 6)
+            if batch_labels is not None:
+                model_is_anomaly = bool(batch_labels[i].detach().cpu().item())
+            else:
+                model_is_anomaly = bool(score > score_threshold)
 
             originals[i].save(orig_path)
             loc = self._save_visuals(
@@ -139,13 +265,16 @@ class AdService:
                 h_path=heatmap_path,
                 m_path=mask_path,
                 o_path=overlay_path,
-                threshold=threshold,
+                threshold=map_threshold,
                 anomaly_score=score,
             )
 
             results.append(
                 {
                     "ad_score": score,
+                    "model_is_anomaly": model_is_anomaly,
+                    "model_threshold": float(score_threshold),
+                    "mask_threshold": float(map_threshold),
                     "original_path": str(orig_path),
                     "heatmap_path": str(heatmap_path),
                     "mask_path": str(mask_path),
@@ -173,14 +302,17 @@ class AdService:
     ) -> Dict[str, Any]:
         input_img = np.array(orig_img)
         h, w = amap.shape
-        amap_norm = (amap - amap.min()) / (amap.max() - amap.min() + 1e-8)
+        amap_raw = amap.astype(np.float32)
+        amap_norm = (amap_raw - amap_raw.min()) / (amap_raw.max() - amap_raw.min() + 1e-8)
         amap_8bit = (amap_norm * 255).astype(np.uint8)
+        mask_threshold = float(threshold)
 
         heatmap = cv2.applyColorMap(amap_8bit, cv2.COLORMAP_JET)
         heatmap_rgb = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
         Image.fromarray(cv2.addWeighted(input_img, 0.5, heatmap_rgb, 0.5, 0)).save(h_path)
 
-        mask = (amap_norm > threshold).astype(np.uint8) * 255
+        # run_ad_inference와 동일하게 raw anomaly_map을 thresholding.
+        mask = (amap_raw > mask_threshold).astype(np.uint8) * 255
         loc: Dict[str, Any] = {
             "has_defect": False,
             "region": "none",
@@ -195,13 +327,10 @@ class AdService:
             rx = "left" if cx < 0.33 else ("right" if cx > 0.66 else "center")
             if ry == "middle" and rx == "center":
                 return "center"
-            if ry == "middle":
-                return rx
             return f"{ry}-{rx}"
 
         if np.any(mask > 0):
-            mask_cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-            coords = np.where(mask_cleaned > 0)
+            coords = np.where(mask > 0)
             if len(coords[0]) > 0:
                 y_min, y_max = int(coords[0].min()), int(coords[0].max())
                 x_min, x_max = int(coords[1].min()), int(coords[1].max())
@@ -211,8 +340,8 @@ class AdService:
 
                 region = infer_region(center_x, center_y)
 
-                area_ratio = round(float(np.sum(mask_cleaned > 0)) / (h * w), 4)
-                confidence = round(float(amap_norm[mask_cleaned > 0].max()), 4)
+                area_ratio = round(float(np.sum(mask > 0)) / (h * w), 4)
+                confidence = round(float(amap_raw[mask > 0].max()), 4)
                 loc.update(
                     {
                         "has_defect": True,
@@ -223,10 +352,10 @@ class AdService:
                         "confidence": confidence,
                     }
                 )
-        elif anomaly_score is not None and float(anomaly_score) > float(threshold):
+        elif anomaly_score is not None and float(anomaly_score) > mask_threshold:
             # Score는 NG인데 마스크가 비는 케이스 보정:
             # 최대 응답 지점 주변 최소 영역을 결함 후보로 시각화한다.
-            y_peak, x_peak = np.unravel_index(int(np.argmax(amap_norm)), amap_norm.shape)
+            y_peak, x_peak = np.unravel_index(int(np.argmax(amap_raw)), amap_raw.shape)
             radius = max(2, min(h, w) // 30)
             cv2.circle(mask, (int(x_peak), int(y_peak)), int(radius), 255, thickness=-1)
             x_min = max(0, int(x_peak) - radius)
@@ -236,7 +365,7 @@ class AdService:
             center_x = float(x_peak) / float(max(1, w))
             center_y = float(y_peak) / float(max(1, h))
             area_ratio = round(float(np.sum(mask > 0)) / float(max(1, h * w)), 4)
-            confidence = round(float(amap_norm[y_peak, x_peak]), 4)
+            confidence = round(float(amap_raw[y_peak, x_peak]), 4)
             loc.update(
                 {
                     "has_defect": True,

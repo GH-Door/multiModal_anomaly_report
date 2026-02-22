@@ -127,11 +127,17 @@ COLUMN_ALIASES = {
 }
 
 
-def connect(dsn: str) -> psycopg2.extensions.connection:
-    """Connect to PostgreSQL and ensure tables exist."""
+def connect(dsn: str, *, ensure_schema: bool = True) -> psycopg2.extensions.connection:
+    """Connect to PostgreSQL. Schema sync is optional for hot paths."""
     conn = psycopg2.connect(dsn)
-    create_tables(conn)
+    if ensure_schema:
+        create_tables(conn)
     return conn
+
+
+def connect_fast(dsn: str) -> psycopg2.extensions.connection:
+    """Connect without running schema DDL on every request."""
+    return connect(dsn, ensure_schema=False)
 
 
 def create_tables(conn: psycopg2.extensions.connection) -> None:
@@ -240,6 +246,7 @@ def get_filtered_reports(
     decision: str | None = None,
     limit: int = 5000,
     offset: int = 0,
+    include_full: bool = False,
 ) -> List[Dict[str, Any]]:
     """Fetch reports with optional category/decision filters."""
     clauses = ["1=1"]
@@ -253,8 +260,31 @@ def get_filtered_reports(
         params.append(decision)
 
     params.extend([limit, offset])
+    select_sql = "*"
+    if not include_full:
+        select_sql = """
+            id,
+            dataset,
+            category,
+            line,
+            ad_score,
+            ad_decision,
+            has_defect,
+            region,
+            area_ratio,
+            confidence,
+            image_path,
+            heatmap_path,
+            mask_path,
+            overlay_path,
+            ad_inference_duration,
+            llm_summary,
+            applied_policy,
+            created_at
+        """
+
     sql = f"""
-    SELECT * FROM inspection_reports
+    SELECT {select_sql} FROM inspection_reports
     WHERE {' AND '.join(clauses)}
     ORDER BY created_at DESC NULLS LAST, id DESC
     LIMIT %s OFFSET %s
@@ -316,7 +346,11 @@ def get_category_policy(conn: psycopg2.extensions.connection, category: str) -> 
             return {
                 "t_low": float(policy.get("t_low", DEFAULT_POLICY["t_low"])),
                 "t_high": float(policy.get("t_high", DEFAULT_POLICY["t_high"])),
+                "source": "category_metadata",
             }
     except Exception as exc:
         logger.warning("Failed to load category policy for %s: %s", category, exc)
-    return dict(DEFAULT_POLICY)
+    return {
+        **dict(DEFAULT_POLICY),
+        "source": "default",
+    }

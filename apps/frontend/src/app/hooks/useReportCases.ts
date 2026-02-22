@@ -23,9 +23,11 @@ export function useReportCases(params?: {
   });
 
   const lastAbortRef = useRef<AbortController | null>(null);
+  const inFlightRef = useRef(false);
 
   const load = useCallback(async () => {
-    lastAbortRef.current?.abort();
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     const ac = new AbortController();
     lastAbortRef.current = ac;
 
@@ -40,9 +42,19 @@ export function useReportCases(params?: {
       const mapped = mapReportsToAnomalyCases(reports);
       setState({ loading: false, error: null, cases: mapped });
     } catch (err) {
-      if ((err as any)?.name === "AbortError") return;
+      const message = String((err as any)?.message ?? "");
+      const aborted =
+        ac.signal.aborted ||
+        (err as any)?.name === "AbortError" ||
+        message.toLowerCase().includes("aborted/timeout");
+      if (aborted) {
+        setState((s) => ({ ...s, loading: false }));
+        return;
+      }
       // 폴링 실패 시에도 기존 화면 데이터는 유지한다.
       setState((s) => ({ loading: false, error: err, cases: s.cases }));
+    } finally {
+      inFlightRef.current = false;
     }
   }, [params?.query, params?.pageSize, params?.maxItems]);
 
