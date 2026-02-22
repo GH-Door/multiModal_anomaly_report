@@ -366,6 +366,10 @@ class InternVLClient(BaseLLMClient):
             "max_new_tokens": max(int(self.max_new_tokens), 512),
         }
 
+    def load_model(self):
+        """Public interface for model warm-up before timed evaluation."""
+        self._load_model()
+
     def build_payload(
         self,
         query_image_path: str,

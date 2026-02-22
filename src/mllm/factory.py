@@ -62,15 +62,15 @@ MODEL_REGISTRY = {
     "gemma3-12b": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-12b-it"},
     "gemma3-27b": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-27b-it"},
 
-    # Gemma3 quantized — 4-bit NF4 (requires bitsandbytes + CUDA)
-    "gemma3-4b-int4": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-4b-it", "quantization": "int4"},
-    "gemma3-12b-int4": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-12b-it", "quantization": "int4"},
-    "gemma3-27b-int4": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-27b-it", "quantization": "int4"},
+    # Gemma3 pre-quantized INT4 (TorchAO, requires torchao + CUDA)
+    "gemma3-4b-int4": {"type": "local", "class": "Gemma3Client", "model": "pytorch/gemma-3-4b-it-HQQ-INT8-INT4"},
+    "gemma3-12b-int4": {"type": "local", "class": "Gemma3Client", "model": "pytorch/gemma-3-12b-it-INT4"},
+    "gemma3-27b-int4": {"type": "local", "class": "Gemma3Client", "model": "pytorch/gemma-3-27b-it-INT4"},
 
-    # Gemma3 quantized — 8-bit (requires bitsandbytes + CUDA)
-    "gemma3-4b-int8": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-4b-it", "quantization": "int8"},
-    "gemma3-12b-int8": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-12b-it", "quantization": "int8"},
-    "gemma3-27b-int8": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-27b-it", "quantization": "int8"},
+    # Gemma3 pre-quantized FP8/INT8 (TorchAO, requires torchao + CUDA)
+    "gemma3-4b-int8": {"type": "local", "class": "Gemma3Client", "model": "pytorch/gemma-3-4b-it-HQQ-INT8-INT4"},
+    "gemma3-12b-int8": {"type": "local", "class": "Gemma3Client", "model": "pytorch/gemma-3-12b-it-FP8"},
+    "gemma3-27b-int8": {"type": "local", "class": "Gemma3Client", "model": "pytorch/gemma-3-27b-it-FP8"},
 }
 
 

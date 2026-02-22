@@ -26,11 +26,6 @@ class Gemma3Client(BaseLLMClient):
     - quantization="int8" → BitsAndBytes 8-bit
     """
 
-    _QUANT_DTYPE: dict = {
-        "int4": torch.bfloat16,
-        "int8": torch.float16,
-    }
-
     def __init__(
         self,
         model_path: str = "google/gemma-3-4b-it",
@@ -58,26 +53,6 @@ class Gemma3Client(BaseLLMClient):
         }
         return dtype_map.get(self.torch_dtype_str, torch.bfloat16)
 
-    def get_quant_torch_dtype(self):
-        """양자화 타입에 맞는 torch dtype 반환. None이면 사용자 설정 dtype 사용."""
-        return self._QUANT_DTYPE.get(self.quantization, self.get_torch_dtype())
-
-    def build_bnb_config(self):
-        from transformers import BitsAndBytesConfig
-
-        dtype = self.get_quant_torch_dtype()
-
-        if self.quantization == "int4":
-            return BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=dtype,
-                bnb_4bit_use_double_quant=True,
-            )
-        elif self.quantization == "int8":
-            return BitsAndBytesConfig(load_in_8bit=True)
-        return None
-
     def load_model(self):
         """Lazy load model and processor."""
         if self._model is not None:
@@ -92,12 +67,20 @@ class Gemma3Client(BaseLLMClient):
 
         load_kwargs: dict = {
             "device_map": self.device,
-            "torch_dtype": self.get_quant_torch_dtype(),
+            "torch_dtype": "auto",
         }
 
-        bnb_config = self.build_bnb_config()
-        if bnb_config is not None:
-            load_kwargs["quantization_config"] = bnb_config
+        # torchao 구버전 호환: 설치된 버전이 모르는 인자를 자동으로 필터링
+        try:
+            import inspect
+            from torchao.quantization import Int4WeightOnlyConfig
+            _orig_init = Int4WeightOnlyConfig.__init__
+            _valid = set(inspect.signature(_orig_init).parameters) - {"self"}
+            def _patched_init(self, *args, **kwargs):
+                _orig_init(self, *args, **{k: v for k, v in kwargs.items() if k in _valid})
+            Int4WeightOnlyConfig.__init__ = _patched_init
+        except Exception:
+            pass
 
         self._model = Gemma3ForConditionalGeneration.from_pretrained(
             self.model_path, **load_kwargs
