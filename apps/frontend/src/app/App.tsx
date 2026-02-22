@@ -266,7 +266,7 @@ export default function App() {
       return <LoadingState title="데이터 로드 중" message="백엔드 서버에서 검사 이력을 가져오고 있습니다." />;
     }
 
-    if (error && currentPage !== "settings") {
+    if (error && currentPage !== "settings" && cases.length === 0) {
       return (
         <div className="p-6">
           <EmptyState

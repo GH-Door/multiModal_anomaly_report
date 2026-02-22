@@ -41,7 +41,8 @@ export function useReportCases(params?: {
       setState({ loading: false, error: null, cases: mapped });
     } catch (err) {
       if ((err as any)?.name === "AbortError") return;
-      setState({ loading: false, error: err, cases: [] });
+      // 폴링 실패 시에도 기존 화면 데이터는 유지한다.
+      setState((s) => ({ loading: false, error: err, cases: s.cases }));
     }
   }, [params?.query, params?.pageSize, params?.maxItems]);
 

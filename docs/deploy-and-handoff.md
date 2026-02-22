@@ -44,12 +44,21 @@ Required env examples:
 - `RAG_INDEX_DIR`
 - `OUTPUT_DIR`
 - `DATA_DIR`
+- `INCOMING_WATCH_ENABLED`
+- `INCOMING_ROOT`
+- `INCOMING_DEFAULT_DATASET`
+- `INCOMING_DEFAULT_CATEGORY`
+- `INCOMING_DEFAULT_LINE`
 
 ## 5) Run frontend (React)
 ```bash
 cd apps/frontend
 npm ci
-cp .env.example .env.local
+cat > .env.local <<'ENV'
+VITE_API_BASE_URL=http://127.0.0.1:8000
+VITE_REPORTS_PATH=/reports
+VITE_LLM_MODEL_SETTINGS_PATH=/settings/llm-model
+ENV
 npm run dev -- --host 0.0.0.0 --port 5173
 ```
 

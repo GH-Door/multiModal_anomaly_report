@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS inspection_reports (
   center                 JSONB,
   area_ratio             FLOAT,
   confidence             FLOAT,
+  ingest_source_path     TEXT,
   image_path             TEXT,
   heatmap_path           TEXT,
   mask_path              TEXT,
@@ -63,6 +64,7 @@ REPORT_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_reports_category ON inspection_reports(category);
 CREATE INDEX IF NOT EXISTS idx_reports_decision ON inspection_reports(ad_decision);
 CREATE INDEX IF NOT EXISTS idx_reports_created ON inspection_reports(created_at);
+CREATE INDEX IF NOT EXISTS idx_reports_ingest_source_path ON inspection_reports(ingest_source_path);
 """
 
 ALTER_REPORT_COLUMNS_SQL = [
@@ -73,6 +75,7 @@ ALTER_REPORT_COLUMNS_SQL = [
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS center JSONB;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS area_ratio FLOAT;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS confidence FLOAT;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS ingest_source_path TEXT;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS overlay_path TEXT;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS applied_policy JSONB DEFAULT '{}'::jsonb;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
@@ -93,6 +96,7 @@ ALLOWED_COLUMNS = {
     "center",
     "area_ratio",
     "confidence",
+    "ingest_source_path",
     "image_path",
     "heatmap_path",
     "mask_path",
@@ -259,6 +263,45 @@ def get_filtered_reports(
         cur.execute(sql, tuple(params))
         rows = cur.fetchall()
     return [dict(r) for r in rows]
+
+
+def count_filtered_reports(
+    conn: psycopg2.extensions.connection,
+    *,
+    category: str | None = None,
+    decision: str | None = None,
+) -> int:
+    """Count reports with the same filters used by get_filtered_reports."""
+    clauses = ["1=1"]
+    params: List[Any] = []
+
+    if category:
+        clauses.append("category = %s")
+        params.append(category)
+    if decision:
+        clauses.append("ad_decision = %s")
+        params.append(decision)
+
+    sql = f"""
+    SELECT COUNT(*) AS n
+    FROM inspection_reports
+    WHERE {' AND '.join(clauses)}
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple(params))
+        row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+def has_ingest_source_path(conn: psycopg2.extensions.connection, source_path: str) -> bool:
+    """Return True when a report with the same incoming source path already exists."""
+    if not source_path:
+        return False
+    sql = "SELECT 1 FROM inspection_reports WHERE ingest_source_path = %s LIMIT 1"
+    with conn.cursor() as cur:
+        cur.execute(sql, (source_path,))
+        row = cur.fetchone()
+    return bool(row)
 
 
 def get_category_policy(conn: psycopg2.extensions.connection, category: str) -> Dict[str, Any]:

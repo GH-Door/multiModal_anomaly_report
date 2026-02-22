@@ -130,6 +130,7 @@ class AdService:
             heatmap_path = self.output_root / f"heat_{request_ids[i]}.png"
             mask_path = self.output_root / f"mask_{request_ids[i]}.png"
             overlay_path = self.output_root / f"overlay_{request_ids[i]}.png"
+            score = round(float(batch_scores[i].cpu().item()), 6)
 
             originals[i].save(orig_path)
             loc = self._save_visuals(
@@ -139,11 +140,12 @@ class AdService:
                 m_path=mask_path,
                 o_path=overlay_path,
                 threshold=threshold,
+                anomaly_score=score,
             )
 
             results.append(
                 {
-                    "ad_score": round(float(batch_scores[i].cpu().item()), 6),
+                    "ad_score": score,
                     "original_path": str(orig_path),
                     "heatmap_path": str(heatmap_path),
                     "mask_path": str(mask_path),
@@ -167,6 +169,7 @@ class AdService:
         m_path: Path,
         o_path: Path,
         threshold: float = 0.5,
+        anomaly_score: float | None = None,
     ) -> Dict[str, Any]:
         input_img = np.array(orig_img)
         h, w = amap.shape
@@ -187,6 +190,15 @@ class AdService:
             "confidence": 0.0,
         }
 
+        def infer_region(cx: float, cy: float) -> str:
+            ry = "top" if cy < 0.33 else ("bottom" if cy > 0.66 else "middle")
+            rx = "left" if cx < 0.33 else ("right" if cx > 0.66 else "center")
+            if ry == "middle" and rx == "center":
+                return "center"
+            if ry == "middle":
+                return rx
+            return f"{ry}-{rx}"
+
         if np.any(mask > 0):
             mask_cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
             coords = np.where(mask_cleaned > 0)
@@ -197,9 +209,7 @@ class AdService:
                 center_y = (y_min + y_max) / 2 / h
                 center_x = (x_min + x_max) / 2 / w
 
-                ry = "top" if center_y < 0.33 else ("bottom" if center_y > 0.66 else "middle")
-                rx = "left" if center_x < 0.33 else ("right" if center_x > 0.66 else "center")
-                region = "center" if (ry == "middle" and rx == "center") else (f"{ry}-{rx}" if ry != "middle" else rx)
+                region = infer_region(center_x, center_y)
 
                 area_ratio = round(float(np.sum(mask_cleaned > 0)) / (h * w), 4)
                 confidence = round(float(amap_norm[mask_cleaned > 0].max()), 4)
@@ -213,6 +223,30 @@ class AdService:
                         "confidence": confidence,
                     }
                 )
+        elif anomaly_score is not None and float(anomaly_score) > float(threshold):
+            # Score는 NG인데 마스크가 비는 케이스 보정:
+            # 최대 응답 지점 주변 최소 영역을 결함 후보로 시각화한다.
+            y_peak, x_peak = np.unravel_index(int(np.argmax(amap_norm)), amap_norm.shape)
+            radius = max(2, min(h, w) // 30)
+            cv2.circle(mask, (int(x_peak), int(y_peak)), int(radius), 255, thickness=-1)
+            x_min = max(0, int(x_peak) - radius)
+            x_max = min(w - 1, int(x_peak) + radius)
+            y_min = max(0, int(y_peak) - radius)
+            y_max = min(h - 1, int(y_peak) + radius)
+            center_x = float(x_peak) / float(max(1, w))
+            center_y = float(y_peak) / float(max(1, h))
+            area_ratio = round(float(np.sum(mask > 0)) / float(max(1, h * w)), 4)
+            confidence = round(float(amap_norm[y_peak, x_peak]), 4)
+            loc.update(
+                {
+                    "has_defect": True,
+                    "region": infer_region(center_x, center_y),
+                    "bbox": [x_min, y_min, x_max, y_max],
+                    "center": [round(center_x, 3), round(center_y, 3)],
+                    "area_ratio": area_ratio,
+                    "confidence": confidence,
+                }
+            )
 
         Image.fromarray(mask).save(m_path)
         highlight = input_img.copy()
