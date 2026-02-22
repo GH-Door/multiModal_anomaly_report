@@ -74,6 +74,16 @@ Terminal B:
 streamlit run apps/dashboard/app.py
 ```
 
+Terminal C (React frontend):
+```bash
+cd apps/frontend
+npm ci
+cp .env.example .env.local
+npm run dev -- --host 0.0.0.0 --port 5173
+```
+
+See deployment/handoff runbook: `docs/deploy-and-handoff.md`
+
 ---
 
 ## Step 2: how to extend (PatchCore / AnomalyCLIP)

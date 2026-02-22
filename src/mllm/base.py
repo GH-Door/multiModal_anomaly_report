@@ -64,11 +64,12 @@ Respond in JSON format ONLY:
     "severity": "low/medium/high/none",
     "location": "where the defect is or none",
     "description": "detailed defect description or normal product",
+    "possible_cause": "most likely root cause of the defect or none",
     "confidence": 0.0 to 1.0,
-    "recommendation": "action recommendation"
+    "recommendation": "specific corrective/preventive actions"
   }},
   "summary": {{
-    "summary": "one sentence inspection summary",
+    "summary": "2-3 concise sentences including judgement, key evidence, and urgency",
     "risk_level": "low/medium/high/none"
   }}
 }}'''
@@ -96,11 +97,12 @@ Respond in JSON format ONLY:
     "severity": "low/medium/high/none",
     "location": "where the defect is or none",
     "description": "detailed defect description or normal product",
+    "possible_cause": "most likely root cause of the defect or none",
     "confidence": 0.0 to 1.0,
-    "recommendation": "action recommendation"
+    "recommendation": "specific corrective/preventive actions"
   }},
   "summary": {{
-    "summary": "one sentence inspection summary",
+    "summary": "2-3 concise sentences including judgement, key evidence, and urgency",
     "risk_level": "low/medium/high/none"
   }}
 }}'''
@@ -451,6 +453,7 @@ class BaseLLMClient(ABC):
         image_path: str,
         category: str,
         ad_info: Optional[Dict] = None,
+        few_shot_paths: Optional[List[str]] = None,
     ) -> dict:
         """Build payload for report generation.
 
@@ -467,7 +470,7 @@ class BaseLLMClient(ABC):
             prompt_text = REPORT_PROMPT.format(category=category)
 
         questions = [{"type": "text", "text": prompt_text}]
-        return self.build_payload(image_path, [], questions)
+        return self.build_payload(image_path, few_shot_paths or [], questions)
 
     def generate_report(
         self,
@@ -486,7 +489,12 @@ class BaseLLMClient(ABC):
         Returns:
             Dict with keys: is_anomaly_LLM, llm_report, llm_summary.
         """
-        payload = self.build_report_payload(image_path, category, ad_info)
+        payload = self.build_report_payload(
+            image_path,
+            category,
+            ad_info,
+            few_shot_paths=kwargs.get("few_shot_paths"),
+        )
 
         t0 = time.time()
         response = self.send_request(payload)

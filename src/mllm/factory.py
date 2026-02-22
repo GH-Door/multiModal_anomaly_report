@@ -42,6 +42,12 @@ MODEL_REGISTRY = {
     "internvl3.5-2b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL3_5-2B"},
     "internvl3.5-4b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL3_5-4B"},
     "internvl3.5-8b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL3_5-8B"},
+    # Common typo aliases: internv1 -> internvl
+    "internv1": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL3_5-8B"},
+    "internv1-8b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL2-8B"},
+    "internv1-4b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL2-4B"},
+    "internv1-2b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL2-2B"},
+    "internv1-1b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL2-1B"},
 
     # LLaVA models
     "llava": {"type": "local", "class": "LLaVAClient", "model": "llava-hf/llava-1.5-7b-hf"},
