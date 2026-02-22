@@ -1,5 +1,7 @@
 // src/app/App.tsx
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
+import { AlertOctagon } from "lucide-react"; // 팝업용 아이콘 추가
+
 import { Sidebar } from "./components/Sidebar";
 import { FilterBar, FilterState } from "./components/FilterBar";
 import { LoadingState } from "./components/LoadingState";
@@ -11,8 +13,8 @@ import { CaseDetailPage } from "./pages/CaseDetailPage";
 import { ReportBuilderPage } from "./pages/ReportBuilderPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
-import { mockCases, AnomalyCase } from "./data/mockData";
-import { mockAlerts, Alert, NotificationSettings } from "./data/AlertData";
+import { AnomalyCase } from "./data/mockData";
+import { Alert, NotificationSettings } from "./data/AlertData";
 import { getDateRangeWindow } from "./utils/dateUtils";
 import { clamp01 } from "./utils/number";
 
@@ -32,14 +34,12 @@ const DEFAULT_NOTI: NotificationSettings = {
   consecutiveDefects: true,
 };
 
-// Static options for useReportCases to avoid re-renders
 const REPORT_CASES_OPTIONS = {
   query: {},
   pageSize: 500,
   maxItems: 5000,
 };
 
-// Static options for useLocalStorageState
 const MODEL_STORAGE_OPTIONS = {
   serialize: (v: string) => v,
   deserialize: (raw: string) => raw || "PatchCore",
@@ -58,7 +58,11 @@ const NOTIFICATION_STORAGE_OPTIONS = {
 export default function App() {
   const [currentPage, setCurrentPage] = useState<string>("overview");
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
-  const [alerts] = useState<Alert[]>(mockAlerts);
+  
+  // 팝업 알림 관련 상태
+  const [showToast, setShowToast] = useState(false);
+  const [isExiting, setIsExiting] = useState(false);
+  const [lastNgCount, setLastNgCount] = useState(0);
 
   const [activeModel, setActiveModel] = useLocalStorageState<string>(
     "activeModel", 
@@ -79,9 +83,55 @@ export default function App() {
       NOTIFICATION_STORAGE_OPTIONS
     );
 
+  // 백엔드 데이터 연동 훅
   const { cases: backendCases, loading, error, refetch } = useReportCases(REPORT_CASES_OPTIONS);
 
-  const cases: AnomalyCase[] = error ? mockCases : backendCases;
+  // 1. 실시간 폴링 (5초마다 백엔드 데이터 갱신)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      refetch(); 
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [refetch]);
+
+  const cases: AnomalyCase[] = backendCases;
+
+  // 2. 신규 결함 감지 및 토스트 팝업 트리거
+  useEffect(() => {
+    const currentNgCount = cases.filter(c => c.decision === "NG").length;
+    
+    // 이전에 기록된 개수가 있고, 현재 NG 개수가 더 늘어났다면 신규 발생으로 간주
+    if (lastNgCount > 0 && currentNgCount > lastNgCount) {
+      setShowToast(true);
+      setIsExiting(false);
+
+      const timer = setTimeout(() => {
+        setIsExiting(true);
+        setTimeout(() => setShowToast(false), 400); 
+      }, 5000); 
+
+      return () => clearTimeout(timer);
+    }
+    
+    setLastNgCount(currentNgCount);
+  }, [cases, lastNgCount]);
+
+  // 3. 실시간 알림창 리스트 (우측 사이드바용)
+  const alerts: Alert[] = useMemo(() => {
+    return cases
+      .filter(c => c.decision === "NG")
+      .map(c => ({
+        id: c.id,
+        type: "critical",
+        severity: "high",
+        title: "결함 감지",
+        description: `${c.product_group} 제품에서 결함 발생`,
+        timestamp: c.timestamp,
+        line_id: c.line_id,
+        defect_type: c.defect_type
+      }))
+      .slice(0, 5); // 최신 5개만 유지
+  }, [cases]);
 
   const [filters, setFilters] = useState<FilterState>({
     dateRange: "today",
@@ -134,8 +184,8 @@ export default function App() {
     : null;
 
   const renderPage = () => {
-    if (loading && !error) {
-      return <LoadingState title="불러오는 중" message="백엔드에서 검사 데이터를 가져오고 있습니다." />;
+    if (loading && !error && cases.length === 0) {
+      return <LoadingState title="데이터 로드 중" message="백엔드 서버에서 검사 이력을 가져오고 있습니다." />;
     }
 
     if (error && currentPage !== "settings") {
@@ -143,16 +193,11 @@ export default function App() {
         <div className="p-6">
           <EmptyState
             type="error"
-            title="백엔드 데이터 로딩 실패"
-            description="현재는 Mock 데이터를 사용 중입니다. 서버 실행/URL/CORS를 확인해 주세요."
+            title="연동 실패"
+            description="백엔드 서버와 통신할 수 없습니다. 서버 실행 상태를 확인하세요."
           />
-          <div className="flex justify-center">
-            <button
-              onClick={refetch}
-              className="px-4 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800"
-            >
-              다시 시도
-            </button>
+          <div className="flex justify-center mt-4">
+            <button onClick={refetch} className="px-4 py-2 bg-gray-900 text-white rounded-lg">다시 시도</button>
           </div>
         </div>
       );
@@ -192,7 +237,27 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen bg-gray-50">
+    <div className="flex h-screen bg-gray-50 relative">
+      
+      {/* 팝업(Toast) 알림 UI */}
+      {showToast && (
+        <div className={`fixed top-6 right-6 z-[9999] ${isExiting ? 'animate-toast-out' : 'animate-toast-in'}`}>
+          <div className="bg-red-600 text-white px-6 py-4 rounded-lg shadow-2xl flex items-center space-x-3 border-2 border-red-400">
+            <div className="bg-white p-1 rounded-full">
+              <AlertOctagon className="w-6 h-6 text-red-600" />
+            </div>
+            <div>
+              <p className="font-bold">신규 결함 감지!</p>
+              <p className="text-sm opacity-90 font-medium">최신 검사에서 불량이 발견되었습니다.</p>
+            </div>
+            <button onClick={() => {
+              setIsExiting(true);
+              setTimeout(() => setShowToast(false), 400);
+            }}>✕</button>
+          </div>
+        </div>
+      )}
+
       <Sidebar currentPage={currentPage} onNavigate={handleNavigate} />
 
       <div className="flex-1 flex flex-col overflow-hidden">
