@@ -262,6 +262,10 @@ class InternVLClient(BaseLLMClient):
 
         # Model loaded
 
+    def load_model(self):
+        """Public interface for model warm-up before timed evaluation."""
+        self._load_model()
+
     def build_payload(
         self,
         query_image_path: str,

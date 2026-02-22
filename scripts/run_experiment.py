@@ -328,6 +328,13 @@ def run_experiment(cfg: ExperimentConfig) -> Path:
         print(f"Error: {e}")
         sys.exit(1)
 
+    # Warm up local model before timing starts (excludes cold-start from per-image latency)
+    if hasattr(llm_client, 'load_model'):
+        print("Warming up model (pre-loading weights)...")
+        llm_client.load_model()
+        print("Model ready.")
+        print()
+
     # Track statistics
     total_correct = 0
     total_questions = 0
