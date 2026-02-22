@@ -122,55 +122,61 @@ export function OverviewPage({ cases, alerts, activeModel }: OverviewPageProps) 
         </div>
 
         <div className="space-y-4">
-          {alerts.map((alert) => {
-            const Icon = getAlertIcon(alert.type);
-            const isCritical = alert.severity === "high";
-            const isMedium = alert.severity === "med";
+          {alerts.length === 0 ? (
+            <div className="p-4 rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-500">
+              실시간 알림이 없습니다.
+            </div>
+          ) : (
+            alerts.map((alert) => {
+              const Icon = getAlertIcon(alert.type);
+              const isCritical = alert.severity === "high";
+              const isMedium = alert.severity === "med";
 
-            return (
-              <div
-                key={alert.id}
-                className={`p-4 rounded-lg border flex gap-4 items-start ${
-                  isCritical
-                    ? "bg-red-50 border-red-100"
-                    : isMedium
-                      ? "bg-orange-50 border-orange-100"
-                      : "bg-blue-50 border-blue-100"
-                }`}
-              >
-                <div className="mt-1">
-                  <Icon
-                    className={`w-5 h-5 ${
-                      isCritical ? "text-red-600" : isMedium ? "text-orange-600" : "text-blue-600"
-                    }`}
-                  />
-                </div>
-
-                <div className="flex-1">
-                  <div className="flex justify-between items-start">
-                    <h3
-                      className={`font-semibold ${
-                        isCritical ? "text-red-900" : isMedium ? "text-orange-900" : "text-blue-900"
+              return (
+                <div
+                  key={alert.id}
+                  className={`p-4 rounded-lg border flex gap-4 items-start ${
+                    isCritical
+                      ? "bg-red-50 border-red-100"
+                      : isMedium
+                        ? "bg-orange-50 border-orange-100"
+                        : "bg-blue-50 border-blue-100"
+                  }`}
+                >
+                  <div className="mt-1">
+                    <Icon
+                      className={`w-5 h-5 ${
+                        isCritical ? "text-red-600" : isMedium ? "text-orange-600" : "text-blue-600"
                       }`}
-                    >
-                      {alert.title}
-                    </h3>
-                    <span className="text-xs text-gray-500">
-                      {alert.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                    </span>
+                    />
                   </div>
 
-                  <p
-                    className={`text-sm mt-1 ${
-                      isCritical ? "text-red-700" : isMedium ? "text-orange-700" : "text-blue-700"
-                    }`}
-                  >
-                    {alertDescription(alert)}
-                  </p>
+                  <div className="flex-1">
+                    <div className="flex justify-between items-start">
+                      <h3
+                        className={`font-semibold ${
+                          isCritical ? "text-red-900" : isMedium ? "text-orange-900" : "text-blue-900"
+                        }`}
+                      >
+                        {alert.title}
+                      </h3>
+                      <span className="text-xs text-gray-500">
+                        {alert.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      </span>
+                    </div>
+
+                    <p
+                      className={`text-sm mt-1 ${
+                        isCritical ? "text-red-700" : isMedium ? "text-orange-700" : "text-blue-700"
+                      }`}
+                    >
+                      {alertDescription(alert)}
+                    </p>
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })
+          )}
         </div>
       </div>
 

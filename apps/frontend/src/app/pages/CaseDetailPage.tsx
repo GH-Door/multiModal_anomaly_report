@@ -45,7 +45,8 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
     return isNaN(d.getTime()) ? "N/A" : d.toLocaleString("ko-KR");
   }, [caseData.timestamp]);
 
-  const isLlmComplete = !!caseData.llm_analysis_summary;
+  const llmSummary = String(caseData.llm_summary ?? "").trim();
+  const isLlmComplete = llmSummary.length > 0;
 
   return (
     <div className="p-8 bg-white min-h-screen">
@@ -124,7 +125,7 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
               
               {isLlmComplete ? (
                 <p className="text-sm text-blue-900 leading-relaxed whitespace-pre-wrap">
-                  {caseData.llm_analysis_summary}
+                  {llmSummary}
                 </p>
               ) : (
                 <div className="flex items-center gap-3 py-2">

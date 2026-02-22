@@ -10,9 +10,10 @@ from typing import Optional
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 import src.storage.pg as pg
-from src.mllm.factory import get_llm_client
+from src.mllm.factory import get_llm_client, list_llm_models
 from src.service.ad_service import AdService
 from src.service.llm_service import LlmService
 from src.service.visual_rag_service import RagService
@@ -28,6 +29,19 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "/home/ubuntu/ad_results"))
 DATA_DIR = Path(os.getenv("DATA_DIR", "/home/ubuntu/dataset"))
 
 
+class LlmModelUpdateRequest(BaseModel):
+    model: str
+
+
+def _set_llm_model(app: FastAPI, model_name: str) -> None:
+    selected = model_name.strip()
+    if not selected:
+        raise ValueError("Model name must not be empty")
+    app.state.llm_client = get_llm_client(selected)
+    app.state.llm_service = LlmService(client=app.state.llm_client)
+    app.state.llm_model = selected
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.db_conn = pg.connect(DATABASE_URL)
@@ -36,8 +50,7 @@ async def lifespan(app: FastAPI):
         output_root=str(OUTPUT_DIR),
     )
     app.state.rag_service = RagService(index_dir=RAG_INDEX_DIR)
-    app.state.llm_client = get_llm_client(MODEL_NAME)
-    app.state.llm_service = LlmService(client=app.state.llm_client)
+    _set_llm_model(app, MODEL_NAME)
     try:
         yield
     finally:
@@ -57,6 +70,31 @@ app.add_middleware(
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR), check_dir=False), name="outputs")
 app.mount("/data/datasets", StaticFiles(directory=str(DATA_DIR), check_dir=False), name="datasets")
+
+
+@app.get("/settings/llm-model")
+async def get_llm_model_settings():
+    return {
+        "active_model": str(getattr(app.state, "llm_model", MODEL_NAME)),
+        "available_models": list_llm_models(),
+    }
+
+
+@app.put("/settings/llm-model")
+async def update_llm_model_settings(payload: LlmModelUpdateRequest):
+    model_name = payload.model.strip()
+    try:
+        _set_llm_model(app, model_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to switch LLM model")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "active_model": str(app.state.llm_model),
+        "available_models": list_llm_models(),
+    }
 
 
 @app.post("/inspect")
@@ -158,4 +196,3 @@ async def get_reports(
     except Exception as exc:
         logger.exception("Report list fetch failed")
         raise HTTPException(status_code=500, detail="데이터 조회 중 오류가 발생했습니다.") from exc
-

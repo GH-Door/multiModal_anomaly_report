@@ -155,9 +155,10 @@ function normalizeRemoteToReportDTO(x: any, idx: number): ReportDTO {
       ? x.ad_score
       : (typeof llm?.confidence === "number" ? llm.confidence : null);
 
-  // 서버 내부 절대경로는 브라우저에서 접근 불가하므로 비웁니다.
+  // 서버 절대경로(/home/...)는 media.normalizeUrl에서 /outputs/{filename}로 정규화한다.
+  // 여기서 비워버리면 상세 원본 이미지가 표시되지 않으므로 원본 값을 유지한다.
   const rawImagePath = typeof x?.image_path === "string" ? x.image_path : "";
-  const image_path = rawImagePath.startsWith("/home/") ? "" : rawImagePath;
+  const image_path = rawImagePath;
   const overlayPath = x?.overlay_path ?? x?.mask_path ?? null;
 
   const item = {

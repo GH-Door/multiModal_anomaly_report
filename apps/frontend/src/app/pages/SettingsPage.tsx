@@ -2,14 +2,12 @@
 import React from "react";
 import { Settings, Users, Bell, Database } from "lucide-react";
 import type { NotificationSettings } from "../data/AlertData";
-import { clamp01 } from "../utils/number";
 
 interface SettingsPageProps {
   activeModel: string;
   onModelChange: (model: string) => void;
-
-  threshold: number;
-  onThresholdChange: (v: number) => void;
+  llmModels: string[];
+  modelSyncing: boolean;
 
   notifications: NotificationSettings;
   onNotificationsChange: (next: NotificationSettings) => void;
@@ -20,8 +18,8 @@ interface SettingsPageProps {
 export function SettingsPage({
   activeModel,
   onModelChange,
-  threshold,
-  onThresholdChange,
+  llmModels,
+  modelSyncing,
   notifications,
   onNotificationsChange,
 }: SettingsPageProps) {
@@ -45,32 +43,23 @@ export function SettingsPage({
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                기본 임계값 (Threshold)
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                value={threshold}
-                onChange={(e) => onThresholdChange(clamp01(Number(e.target.value)))}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                이상 탐지 기준 점수 (0.0 - 1.0)
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                활성 모델
+                활성 LLM 모델
               </label>
               <select
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                 value={activeModel}
                 onChange={(e) => onModelChange(e.target.value)}
+                disabled={modelSyncing}
               >
-                <option value="EfficientAD">EfficientAD</option>
-                <option value="PatchCore">PatchCore</option>
+                {llmModels.map((modelName) => (
+                  <option key={modelName} value={modelName}>
+                    {modelName}
+                  </option>
+                ))}
               </select>
+              <p className="text-xs text-gray-500 mt-1">
+                변경 시 백엔드 LLM 모델이 즉시 전환됩니다.
+              </p>
             </div>
           </div>
         </div>

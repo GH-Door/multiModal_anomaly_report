@@ -1,7 +1,8 @@
 // src/app/pages/AnomalyQueuePage.tsx
-import React from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { AnomalyCase } from "../data/mockData";
 import { Search } from "lucide-react";
+import { defectTypeLabel, locationLabel } from "../utils/labels";
 
 interface AnomalyQueuePageProps {
   cases: AnomalyCase[];
@@ -9,11 +10,29 @@ interface AnomalyQueuePageProps {
 }
 
 export function AnomalyQueuePage({ cases, onCaseClick }: AnomalyQueuePageProps) {
+  const PAGE_SIZE = 10;
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(cases.length / PAGE_SIZE));
+
+  useEffect(() => {
+    setPage(1);
+  }, [cases.length]);
+
+  const visibleCases = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return cases.slice(start, start + PAGE_SIZE);
+  }, [cases, page]);
+
+  const goPrev = () => setPage((p) => Math.max(1, p - 1));
+  const goNext = () => setPage((p) => Math.min(totalPages, p + 1));
+
   return (
     <div className="p-6 space-y-6 bg-gray-50 min-h-full">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">이상 큐</h1>
-        <p className="text-gray-500 mt-1">총 {cases.length}개 케이스</p>
+        <p className="text-gray-500 mt-1">
+          총 {cases.length}개 케이스 · {page}/{totalPages} 페이지
+        </p>
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
@@ -26,16 +45,14 @@ export function AnomalyQueuePage({ cases, onCaseClick }: AnomalyQueuePageProps) 
               <th className="px-6 py-3">교대</th>
               <th className="px-6 py-3">제품</th>
               <th className="px-6 py-3">결함 타입</th>
-              <th className="px-6 py-3">Score</th>
               <th className="px-6 py-3">위치</th>
               <th className="px-6 py-3">판정</th>
-              <th className="px-6 py-3">심각도</th>
               <th className="px-6 py-3"></th>
             </tr>
           </thead>
 
           <tbody className="divide-y divide-gray-100">
-            {cases.map((c) => (
+            {visibleCases.map((c) => (
               <tr key={c.id} className="hover:bg-gray-50 transition-colors">
                 <td className="px-6 py-4 text-gray-500 whitespace-nowrap">
                   {c.timestamp.toLocaleDateString()} <br />
@@ -58,23 +75,8 @@ export function AnomalyQueuePage({ cases, onCaseClick }: AnomalyQueuePageProps) 
                   </div>
                 </td>
 
-                <td className="px-6 py-4 text-gray-700">{c.defect_type === "none" ? "-" : c.defect_type}</td>
-
-                <td className="px-6 py-4">
-                  <div className="flex items-center gap-2">
-                    <div className="w-16 h-2 bg-gray-100 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full ${
-                          c.anomaly_score > 0.8 ? "bg-red-500" : c.anomaly_score > 0.6 ? "bg-orange-500" : "bg-green-500"
-                        }`}
-                        style={{ width: `${c.anomaly_score * 100}%` }}
-                      />
-                    </div>
-                    <span className="text-xs font-medium">{c.anomaly_score.toFixed(2)}</span>
-                  </div>
-                </td>
-
-                <td className="px-6 py-4 text-gray-500">{c.location === "none" ? "-" : c.location}</td>
+                <td className="px-6 py-4 text-gray-700">{defectTypeLabel(c.defect_type)}</td>
+                <td className="px-6 py-4 text-gray-500">{locationLabel(c.location)}</td>
 
                 <td className="px-6 py-4">
                   <span
@@ -89,20 +91,6 @@ export function AnomalyQueuePage({ cases, onCaseClick }: AnomalyQueuePageProps) 
                     {c.decision}
                   </span>
                 </td>
-
-              <td className="px-6 py-4 whitespace-nowrap">
-                <span
-                  className={`inline-flex items-center justify-center px-2 py-1 rounded border text-xs whitespace-nowrap ${
-                    c.severity === "high"
-                      ? "bg-red-50 border-red-200 text-red-700"
-                      : c.severity === "med"
-                        ? "bg-orange-50 border-orange-200 text-orange-700"
-                        : "bg-gray-50 border-gray-200 text-gray-600"
-                  }`}
-  >
-                  {c.severity === "high" ? "높음" : c.severity === "med" ? "중간" : "낮음"}
-                </span>
-              </td>
               
                 <td className="px-6 py-4 text-right">
                   <button
@@ -116,6 +104,26 @@ export function AnomalyQueuePage({ cases, onCaseClick }: AnomalyQueuePageProps) 
             ))}
           </tbody>
         </table>
+
+        <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-gray-100 bg-gray-50">
+          <button
+            onClick={goPrev}
+            disabled={page <= 1}
+            className="px-3 py-1.5 text-sm border border-gray-300 rounded disabled:opacity-40 disabled:cursor-not-allowed bg-white"
+          >
+            이전
+          </button>
+          <span className="text-sm text-gray-600 min-w-20 text-center">
+            {page} / {totalPages}
+          </span>
+          <button
+            onClick={goNext}
+            disabled={page >= totalPages}
+            className="px-3 py-1.5 text-sm border border-gray-300 rounded disabled:opacity-40 disabled:cursor-not-allowed bg-white"
+          >
+            다음
+          </button>
+        </div>
       </div>
     </div>
   );

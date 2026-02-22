@@ -24,7 +24,6 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps) {
     <div className="w-64 bg-gray-900 text-white h-screen flex flex-col sticky top-0">
       <div className="p-6 border-b border-gray-800">
         <h1 className="text-xl font-semibold">품질 관리 시스템</h1>
-        <p className="text-sm text-gray-400 mt-1">Anomaly Detection</p>
       </div>
 
       <nav className="flex-1 p-4">

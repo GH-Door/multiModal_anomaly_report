@@ -83,7 +83,6 @@ export function toHourlyDecisionTrend(agg: ReturnType<typeof buildAggregates>): 
   const out: HourlyDecisionRow[] = [];
   for (let h = 0; h < 24; h++) {
     const x = agg.hourly[h];
-    if (x.total === 0) continue;
     out.push({
       hour: `${h}시`,
       불량: x.ng,

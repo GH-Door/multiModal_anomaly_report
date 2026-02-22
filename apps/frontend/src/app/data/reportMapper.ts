@@ -1,5 +1,4 @@
 import type { AnomalyCase, ActionLog } from "./mockData";
-import type { ReportDTO } from "../api/reportsApi";
 
 /**
  * 백엔드 실데이터(DB) -> 프론트 AnomalyCase 매핑
@@ -19,7 +18,6 @@ const PACKAGING_CLASS_LABEL: Record<string, string> = {
 };
 
 const LINES = ["LINE-A-01", "LINE-B-02", "LINE-C-03"];
-const LOCS = ["top-left", "top-right", "bottom-left", "bottom-right", "center"] as const;
 
 function hash01(s: string): number {
   let h = 2166136261;
@@ -30,11 +28,11 @@ function hash01(s: string): number {
   return (h >>> 0) / 4294967295;
 }
 
-function parseDatetime(dt?: string): Date {
-  if (!dt) return new Date();
-  const cleaned = dt.replace(/(\.\d{3})\d+/, "$1");
+function parseDatetime(dt?: string | null): Date | null {
+  if (!dt) return null;
+  const cleaned = String(dt).replace(/(\.\d{3})\d+/, "$1");
   const d = new Date(cleaned);
-  return isNaN(d.getTime()) ? new Date() : d;
+  return isNaN(d.getTime()) ? null : d;
 }
 
 function parseJsonLike(input: unknown): any {
@@ -48,6 +46,22 @@ function parseJsonLike(input: unknown): any {
     }
   }
   return {};
+}
+
+function pickString(values: unknown[]): string | undefined {
+  for (const v of values) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return undefined;
+}
+
+function toNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
 }
 
 function toProductGroup(category: string): string {
@@ -64,6 +78,46 @@ function toLineId(seed: string): string {
 function toShift(d: Date): string {
   const hour = d.getHours();
   return hour >= 7 && hour < 19 ? "주간" : "야간";
+}
+
+function normalizeDefectType(raw?: string, decision?: "OK" | "NG" | "REVIEW"): string {
+  if (decision === "OK") return "none";
+  const v = (raw ?? "").trim().toLowerCase().replace(/\s+/g, "_");
+  if (!v) return decision === "NG" ? "anomaly" : "none";
+
+  const map: Record<string, string> = {
+    "seal-issue": "seal_issue",
+    seal_issue: "seal_issue",
+    missing_component: "missing_component",
+  };
+
+  const normalized = map[v] ?? v;
+  if (["none", "normal", "ok", "good", "no_defect", "no-defect"].includes(normalized)) {
+    return decision === "NG" ? "anomaly" : "none";
+  }
+  return normalized;
+}
+
+function normalizeLocation(raw?: string, decision?: "OK" | "NG" | "REVIEW"): string {
+  if (decision === "OK") return "none";
+  const base = (raw ?? "").trim().toLowerCase();
+  if (!base) return "center";
+
+  const compact = base.replace(/_/g, "-").replace(/\s+/g, "-");
+  const alias: Record<string, string> = {
+    centre: "center",
+    middle: "center",
+    "middle-center": "center",
+    "top-center": "top",
+    "bottom-center": "bottom",
+    "mid-left": "middle-left",
+    "mid-right": "middle-right",
+  };
+  const normalized = alias[compact] ?? compact;
+  if (["none", "unknown", "na", "n/a", "-"].includes(normalized)) {
+    return decision === "NG" ? "center" : "none";
+  }
+  return normalized;
 }
 
 /**
@@ -111,21 +165,39 @@ function toActionLog(decision: "OK" | "NG" | "REVIEW", ts: Date): ActionLog[] {
 
 export function mapReportsToAnomalyCases(raw: any[]): AnomalyCase[] {
   return raw.map((r, idx) => {
-    // 백엔드 원본 레코드/정규화 DTO 둘 다 허용
-    const ts = parseDatetime(r.created_at ?? r.datetime);
+    const ts = parseDatetime(r.created_at) ?? parseDatetime(r.datetime) ?? new Date();
     const decision = normalizeDecision(r.ad_decision ?? r.decision);
 
     const dataset = r.dataset ?? "UNKNOWN";
     const category = r.category ?? "unknown";
 
-    const loc = decision === "OK" ? "none" : (r.region ?? r.location ?? "center");
-
-    // llm_report, llm_summary는 문자열(JSON) 또는 객체(JSONB) 둘 다 가능
-    const llmReport: any = parseJsonLike(r.llm_report);
+    const llmReportRoot: any = parseJsonLike(r.llm_report);
+    const llmReport: any = parseJsonLike(llmReportRoot.report ?? llmReportRoot);
     const llmSummaryObj: any = parseJsonLike(r.llm_summary);
 
-    const defectType = llmReport.anomaly_type ?? (r.has_defect ? "anomaly" : "none");
+    const defectType = normalizeDefectType(
+      pickString([
+        llmReport.anomaly_type,
+        llmReport.defect_type,
+        llmSummaryObj.anomaly_type,
+        llmSummaryObj.defect_type,
+        r.defect_type,
+      ]) ?? (r.has_defect ? "anomaly" : "none"),
+      decision
+    );
+    const loc = normalizeLocation(
+      pickString([
+        llmReport.location,
+        llmReport.defect_location?.region,
+        llmSummaryObj.location,
+        r.location,
+        r.region,
+      ]) ?? "center",
+      decision
+    );
     const severity = normalizeSeverity(llmReport.severity, decision);
+    const adScore = toNumber(r.ad_score) ?? toNumber(r.confidence) ?? 0;
+    const areaRatio = toNumber(r.area_ratio) ?? 0;
 
     return {
       id: `CASE-${r.id || idx}`,
@@ -142,13 +214,13 @@ export function mapReportsToAnomalyCases(raw: any[]): AnomalyCase[] {
       overlay_path: r.overlay_path ?? undefined,
 
       decision,
-      anomaly_score: typeof r.ad_score === "number" ? r.ad_score : (typeof r.confidence === "number" ? r.confidence : 0),
+      anomaly_score: adScore,
       threshold: (r.applied_policy?.t_high) ?? 0.7,
 
       defect_type: defectType,
-      defect_confidence: r.area_ratio ?? (typeof r.confidence === "number" ? r.confidence : 0),
+      defect_confidence: areaRatio || (toNumber(r.confidence) ?? 0),
       location: loc,
-      affected_area_pct: r.area_ratio ? r.area_ratio * 100 : 0,
+      affected_area_pct: areaRatio * 100,
       severity,
 
       model_name: "EfficientAD",
@@ -159,7 +231,9 @@ export function mapReportsToAnomalyCases(raw: any[]): AnomalyCase[] {
           : (typeof r.inference_time === "number" ? Math.round(r.inference_time * 1000) : 0),
 
       // LLM 요약 매핑
-      llm_summary: llmSummaryObj.summary ?? r.summary ?? toKoreanSummary(decision, defectType, loc),
+      llm_summary:
+        pickString([llmSummaryObj.summary, llmReport.summary, r.summary]) ??
+        toKoreanSummary(decision, defectType, loc),
 
       llm_structured_json: { source: r },
       operator_note: typeof r.llm_report === "string" ? r.llm_report.trim() : "",

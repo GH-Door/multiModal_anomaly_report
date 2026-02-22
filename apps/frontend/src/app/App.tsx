@@ -12,11 +12,11 @@ import { AnomalyQueuePage } from "./pages/AnomalyQueuePage";
 import { CaseDetailPage } from "./pages/CaseDetailPage";
 import { ReportBuilderPage } from "./pages/ReportBuilderPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { fetchLlmModelSettings, updateLlmModelSettings } from "./api/settingsApi";
 
 import { AnomalyCase } from "./data/mockData";
 import { Alert, NotificationSettings } from "./data/AlertData";
 import { getDateRangeWindow } from "./utils/dateUtils";
-import { clamp01 } from "./utils/number";
 
 import { useReportCases } from "./hooks/useReportCases";
 import { useLocalStorageState } from "./hooks/useLocalStorageState";
@@ -42,13 +42,7 @@ const REPORT_CASES_OPTIONS = {
 
 const MODEL_STORAGE_OPTIONS = {
   serialize: (v: string) => v,
-  deserialize: (raw: string) => raw || "PatchCore",
-};
-
-const THRESHOLD_STORAGE_OPTIONS = {
-  serialize: (v: number) => String(v),
-  deserialize: (raw: string) => clamp01(Number(raw)),
-  normalize: clamp01,
+  deserialize: (raw: string) => raw || "internvl",
 };
 
 const NOTIFICATION_STORAGE_OPTIONS = {
@@ -66,15 +60,11 @@ export default function App() {
 
   const [activeModel, setActiveModel] = useLocalStorageState<string>(
     "activeModel", 
-    "PatchCore", 
+    "internvl", 
     MODEL_STORAGE_OPTIONS
   );
-
-  const [threshold, setThreshold] = useLocalStorageState<number>(
-    "threshold", 
-    0.65, 
-    THRESHOLD_STORAGE_OPTIONS
-  );
+  const [llmModels, setLlmModels] = useState<string[]>(["internvl"]);
+  const [modelSyncing, setModelSyncing] = useState(false);
 
   const [notificationSettings, setNotificationSettings] =
     useLocalStorageState<NotificationSettings>(
@@ -94,12 +84,34 @@ export default function App() {
     return () => clearInterval(interval);
   }, [refetch]);
 
+  // 백엔드에서 실제 LLM 모델 목록/활성 모델 동기화
+  useEffect(() => {
+    const ac = new AbortController();
+    void (async () => {
+      try {
+        const cfg = await fetchLlmModelSettings({ signal: ac.signal });
+        const models = Array.isArray(cfg.available_models) ? cfg.available_models : [];
+        if (models.length > 0) setLlmModels(models);
+        if (cfg.active_model) setActiveModel(cfg.active_model);
+      } catch (err) {
+        console.warn("Failed to sync llm model settings", err);
+      }
+    })();
+    return () => ac.abort();
+  }, [setActiveModel]);
+
   const cases: AnomalyCase[] = backendCases;
 
   // 2. 신규 결함 감지 및 토스트 팝업 트리거
   useEffect(() => {
     const currentNgCount = cases.filter(c => c.decision === "NG").length;
-    
+
+    if (!notificationSettings.highSeverity) {
+      setShowToast(false);
+      setLastNgCount(currentNgCount);
+      return;
+    }
+
     // 이전에 기록된 개수가 있고, 현재 NG 개수가 더 늘어났다면 신규 발생으로 간주
     if (lastNgCount > 0 && currentNgCount > lastNgCount) {
       setShowToast(true);
@@ -114,24 +126,73 @@ export default function App() {
     }
     
     setLastNgCount(currentNgCount);
-  }, [cases, lastNgCount]);
+  }, [cases, lastNgCount, notificationSettings.highSeverity]);
 
   // 3. 실시간 알림창 리스트 (우측 사이드바용)
   const alerts: Alert[] = useMemo(() => {
-    return cases
-      .filter(c => c.decision === "NG")
-      .map(c => ({
-        id: c.id,
-        type: "critical",
+    const out: Alert[] = [];
+    const ngCases = [...cases]
+      .filter((c) => c.decision === "NG")
+      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+
+    if (notificationSettings.highSeverity) {
+      out.push(
+        ...ngCases.map((c) => ({
+          id: c.id,
+          type: "critical" as const,
+          severity: "high" as const,
+          title: "결함 감지",
+          description: `${c.product_group} 제품에서 결함 발생`,
+          timestamp: c.timestamp,
+          line_id: c.line_id,
+          defect_type: c.defect_type,
+        }))
+      );
+    }
+
+    if (notificationSettings.consecutiveDefects) {
+      const counts = new Map<string, { lineId: string; location: string; count: number; timestamp: Date }>();
+      for (const c of ngCases.slice(0, 200)) {
+        const key = `${c.line_id}|${c.location}`;
+        const prev = counts.get(key);
+        if (!prev) {
+          counts.set(key, { lineId: c.line_id, location: c.location, count: 1, timestamp: c.timestamp });
+        } else {
+          prev.count += 1;
+          if (c.timestamp.getTime() > prev.timestamp.getTime()) prev.timestamp = c.timestamp;
+        }
+      }
+
+      for (const [key, value] of counts.entries()) {
+        if (value.count < 3) continue;
+        out.push({
+          id: `consecutive-${key}`,
+          type: "consecutive",
+          severity: "high",
+          title: "연속 불량 감지",
+          timestamp: value.timestamp,
+          line_id: value.lineId,
+          location: value.location,
+          count: value.count,
+        });
+      }
+    }
+
+    if (notificationSettings.systemError && error) {
+      out.push({
+        id: "system-error-alert",
+        type: "system",
         severity: "high",
-        title: "결함 감지",
-        description: `${c.product_group} 제품에서 결함 발생`,
-        timestamp: c.timestamp,
-        line_id: c.line_id,
-        defect_type: c.defect_type
-      }))
-      .slice(0, 5); // 최신 5개만 유지
-  }, [cases]);
+        title: "시스템 오류",
+        timestamp: new Date(),
+        description: "백엔드 통신 오류가 발생했습니다.",
+      });
+    }
+
+    return out
+      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+      .slice(0, 5);
+  }, [cases, error, notificationSettings.consecutiveDefects, notificationSettings.highSeverity, notificationSettings.systemError]);
 
   const [filters, setFilters] = useState<FilterState>({
     dateRange: "today",
@@ -148,9 +209,8 @@ export default function App() {
       ...c,
       model_name: activeModel,
       model_version: version,
-      threshold,
     }));
-  }, [cases, activeModel, threshold]);
+  }, [cases, activeModel]);
 
   const filteredCases = useMemo(() => {
     const window = getDateRangeWindow(filters.dateRange);
@@ -177,6 +237,24 @@ export default function App() {
   const handleCaseClick = (caseId: string) => {
     setSelectedCaseId(caseId);
     setCurrentPage("detail");
+  };
+
+  const handleModelChange = (nextModel: string) => {
+    if (!nextModel) return;
+    setModelSyncing(true);
+    void (async () => {
+      try {
+        const updated = await updateLlmModelSettings(nextModel);
+        setActiveModel(updated.active_model || nextModel);
+        if (Array.isArray(updated.available_models) && updated.available_models.length > 0) {
+          setLlmModels(updated.available_models);
+        }
+      } catch (err) {
+        console.error("Failed to update llm model", err);
+      } finally {
+        setModelSyncing(false);
+      }
+    })();
   };
 
   const currentCase = selectedCaseId
@@ -224,9 +302,9 @@ export default function App() {
         return (
           <SettingsPage
             activeModel={activeModel}
-            onModelChange={setActiveModel}
-            threshold={threshold}
-            onThresholdChange={setThreshold}
+            onModelChange={handleModelChange}
+            llmModels={llmModels}
+            modelSyncing={modelSyncing}
             notifications={notificationSettings}
             onNotificationsChange={setNotificationSettings}
           />
