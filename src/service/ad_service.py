@@ -31,6 +31,7 @@ class AdService:
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.model_cache: Dict[str, Any] = {}
         self.input_size = self._resolve_input_size()
+        self.default_score_threshold = self._resolve_default_threshold()
 
     @staticmethod
     def _to_float(value: Any, default: float) -> float:
@@ -78,6 +79,14 @@ class AdService:
             logger.exception("Failed to read anomaly config image_size from %s", cfg_path)
 
         return default_size
+
+    def _resolve_default_threshold(self) -> float:
+        raw = os.getenv("AD_DEFAULT_THRESHOLD", "0.5").strip()
+        try:
+            return float(raw)
+        except ValueError:
+            logger.warning("Invalid AD_DEFAULT_THRESHOLD=%s, using 0.5", raw)
+            return 0.5
 
     def _preprocess(self, image: Image.Image) -> torch.Tensor:
         """Match existing PatchCore script path: resize -> RGB float [0,1] -> CHW tensor."""
@@ -191,7 +200,7 @@ class AdService:
         upload_files: List[Any],
         category: str,
         dataset: str,
-        threshold: float = 0.5,
+        threshold: float | None = None,
     ) -> List[Dict[str, Any]]:
         model = self.get_model(dataset, category)
         inputs = []
@@ -226,21 +235,19 @@ class AdService:
             batch_scores = outputs.view(len(upload_files), -1).max(dim=1).values
             batch_labels = None
 
-        # run_ad_inference와 동일하게 image threshold를 위치 추정에도 사용한다.
-        map_threshold = float(threshold)
-        score_threshold = float(threshold)
+        score_threshold = float(self.default_score_threshold if threshold is None else threshold)
         post = getattr(model, "post_processor", None)
         if post is not None:
             if hasattr(post, "normalized_image_threshold"):
                 score_threshold = self._to_float(getattr(post, "normalized_image_threshold"), score_threshold)
             elif hasattr(post, "image_threshold"):
                 score_threshold = self._to_float(getattr(post, "image_threshold"), score_threshold)
-        map_threshold = score_threshold
+        # run_ad_inference와 동일하게 defect location threshold도 image threshold를 사용한다.
+        map_threshold = float(score_threshold)
 
         results: List[Dict[str, Any]] = []
         for i in range(len(upload_files)):
             amap = batch_maps[i].squeeze().cpu().numpy().astype(np.float32)
-            amap = cv2.GaussianBlur(amap, (3, 3), 0)
 
             w_orig, h_orig = originals[i].size
             if amap.shape != (h_orig, w_orig):

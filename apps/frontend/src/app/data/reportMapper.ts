@@ -39,10 +39,12 @@ function parseJsonLike(input: unknown): any {
   if (!input) return {};
   if (typeof input === "object") return input;
   if (typeof input === "string") {
+    const trimmed = input.trim();
+    if (!trimmed) return {};
     try {
-      return JSON.parse(input);
+      return JSON.parse(trimmed);
     } catch {
-      return {};
+      return { _text: trimmed };
     }
   }
   return {};
@@ -80,22 +82,59 @@ function toShift(d: Date): string {
   return hour >= 7 && hour < 19 ? "주간" : "야간";
 }
 
-function normalizeDefectType(raw?: string, decision?: "OK" | "NG" | "REVIEW"): string {
+function normalizeDefectType(
+  raw?: string,
+  decision?: "OK" | "NG" | "REVIEW",
+  hintText?: string
+): string {
   if (decision === "OK") return "none";
-  const v = (raw ?? "").trim().toLowerCase().replace(/\s+/g, "_");
-  if (!v) return decision === "NG" ? "anomaly" : "none";
+  const v = (raw ?? "").trim().toLowerCase().replace(/\s+/g, "_").replace(/-/g, "_");
 
   const map: Record<string, string> = {
-    "seal-issue": "seal_issue",
     seal_issue: "seal_issue",
+    sealing_issue: "seal_issue",
+    seal: "seal_issue",
+    sealing: "seal_issue",
+    contamination: "contamination",
+    contaminant: "contamination",
+    foreign_object: "contamination",
+    foreign_material: "contamination",
+    crack: "crack",
+    fracture: "crack",
+    broken: "crack",
+    damage: "crack",
     missing_component: "missing_component",
+    missing_part: "missing_component",
+    missing: "missing_component",
+    scratch: "scratch",
+    scuff: "scratch",
+    abrasion: "scratch",
+    실링: "seal_issue",
+    밀봉: "seal_issue",
+    오염: "contamination",
+    이물: "contamination",
+    파손: "crack",
+    균열: "crack",
+    누락: "missing_component",
+    결손: "missing_component",
+    스크래치: "scratch",
+    긁힘: "scratch",
   };
 
-  const normalized = map[v] ?? v;
-  if (["none", "normal", "ok", "good", "no_defect", "no-defect"].includes(normalized)) {
-    return decision === "NG" ? "anomaly" : "none";
+  if (v && map[v]) return map[v];
+
+  const text = `${v} ${(hintText ?? "").toLowerCase()}`;
+  if (/(seal|sealing|실링|밀봉|개봉)/.test(text)) return "seal_issue";
+  if (/(contamin|foreign|dust|stain|smudge|오염|이물|얼룩)/.test(text)) return "contamination";
+  if (/(crack|fracture|broken|damage|tear|파손|균열|찢)/.test(text)) return "crack";
+  if (/(missing|absence|lost|누락|결손|빠짐|없)/.test(text)) return "missing_component";
+  if (/(scratch|scuff|abrasion|스크래치|긁힘)/.test(text)) return "scratch";
+
+  if (["none", "normal", "ok", "good", "no_defect", "no-defect", ""].includes(v)) {
+    return decision === "OK" ? "none" : "contamination";
   }
-  return normalized;
+  // UI 필터 요구사항: 결함 타입은 지정된 5종 중 하나로 고정한다.
+  return decision === "OK" ? "none" : "contamination";
 }
 
 function normalizeLocation(raw?: string, decision?: "OK" | "NG" | "REVIEW"): string {
@@ -139,20 +178,6 @@ function normalizeSeverity(raw?: string, decision?: "OK" | "NG" | "REVIEW"): "lo
   return "low";
 }
 
-function toKoreanSummary(decision: "OK" | "NG" | "REVIEW", defectType: string, location: string): string {
-  if (decision === "OK") return "정상 제품으로 판정되었습니다. 이상 징후가 발견되지 않았습니다.";
-  if (decision === "REVIEW") return "경계 케이스입니다. 육안 재검토를 통해 판정을 확정해 주세요.";
-
-  const locKo =
-    location === "top-left" ? "상단 좌측" :
-    location === "top-right" ? "상단 우측" :
-    location === "bottom-left" ? "하단 좌측" :
-    location === "bottom-right" ? "하단 우측" :
-    location === "center" ? "중앙" : "미상";
-
-  return `${locKo} 영역에서 결함이 감지되었습니다. 불량으로 분류됩니다.`;
-}
-
 function toActionLog(decision: "OK" | "NG" | "REVIEW", ts: Date): ActionLog[] {
   const base = ts.getTime();
   if (decision === "OK") return [{ who: "System", when: new Date(base + 1000), what: "자동 승인" }];
@@ -183,7 +208,14 @@ export function mapReportsToAnomalyCases(raw: any[]): AnomalyCase[] {
         llmSummaryObj.defect_type,
         r.defect_type,
       ]) ?? (r.has_defect ? "anomaly" : "none"),
-      decision
+      decision,
+      pickString([
+        llmReport.description,
+        llmReport.recommendation,
+        llmSummaryObj.summary,
+        llmSummaryObj._text,
+        r.defect_description,
+      ])
     );
     const loc = normalizeLocation(
       pickString([
@@ -232,8 +264,13 @@ export function mapReportsToAnomalyCases(raw: any[]): AnomalyCase[] {
 
       // LLM 요약 매핑
       llm_summary:
-        pickString([llmSummaryObj.summary, llmReport.summary, r.summary]) ??
-        toKoreanSummary(decision, defectType, loc),
+        pickString([
+          llmSummaryObj.summary,
+          llmSummaryObj._text,
+          llmReport.summary,
+          llmReport.description,
+          r.summary,
+        ]) ?? "",
 
       llm_structured_json: { source: r },
       operator_note: typeof r.llm_report === "string" ? r.llm_report.trim() : "",

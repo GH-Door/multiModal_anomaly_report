@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -32,6 +33,8 @@ CHECKPOINT_DIR = Path(os.getenv("AD_CHECKPOINT_DIR", str(PROJECT_ROOT / "checkpo
 RAG_INDEX_DIR = Path(os.getenv("RAG_INDEX_DIR", str(PROJECT_ROOT / "rag_index")))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(PROJECT_ROOT / "outputs")))
 DATA_DIR = Path(os.getenv("DATA_DIR", str(PROJECT_ROOT / "datasets")))
+AD_POLICY_PATH = Path(os.getenv("AD_POLICY_PATH", str(PROJECT_ROOT / "configs" / "ad_policy.json")))
+AD_CALIBRATION_PATH = Path(os.getenv("AD_CALIBRATION_PATH", str(PROJECT_ROOT / "configs" / "ad_calibration.json")))
 
 INCOMING_ROOT = Path(os.getenv("INCOMING_ROOT", "/home/ubuntu/incoming"))
 INCOMING_SCAN_INTERVAL_SEC = float(os.getenv("INCOMING_SCAN_INTERVAL_SEC", "5"))
@@ -82,6 +85,220 @@ class CachedStaticFiles(StaticFiles):
         return response
 
 
+def _load_json_doc(path: Path, *, label: str) -> dict[str, Any]:
+    if not path.exists():
+        logger.warning("%s file not found: %s", label, path)
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            return loaded
+    except Exception:
+        logger.exception("Failed to load %s file: %s", label, path)
+    return {}
+
+
+def _load_ad_policy_doc(path: Path) -> dict[str, Any]:
+    return _load_json_doc(path, label="AD policy")
+
+
+def _load_ad_calibration_doc(path: Path) -> dict[str, Any]:
+    return _load_json_doc(path, label="AD calibration")
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _clip(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def _candidate_class_keys(dataset: str, model_category: str) -> list[str]:
+    key = model_category.strip().strip("/")
+    keys: list[str] = []
+    if key:
+        keys.append(key)
+
+    ds = dataset.strip().strip("/")
+    if key and ds and "/" not in key:
+        keys.append(f"{ds}/{key}")
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for k in keys:
+        if k and k not in seen:
+            out.append(k)
+            seen.add(k)
+    return out
+
+
+def _resolve_class_policy_from_json(doc: dict[str, Any], class_key: str) -> dict[str, Any] | None:
+    if not isinstance(doc, dict):
+        return None
+
+    merged: dict[str, Any] = {}
+    source = "ad_policy_json"
+    default_raw = doc.get("default")
+    if isinstance(default_raw, dict):
+        merged.update(default_raw)
+    classes_raw = doc.get("classes")
+    if isinstance(classes_raw, dict):
+        class_raw = classes_raw.get(class_key)
+        if isinstance(class_raw, dict):
+            merged.update(class_raw)
+            source = "ad_policy_json_class"
+
+    if not merged:
+        return None
+
+    reliability = str(merged.get("reliability", merged.get("reliability_prior", "medium"))).lower()
+    if reliability not in {"high", "medium", "low"}:
+        reliability = "medium"
+
+    review_band = _safe_float(merged.get("review_band"))
+    legacy_center = _safe_float(merged.get("decision_center"))
+    t_low = _safe_float(merged.get("t_low"))
+    t_high = _safe_float(merged.get("t_high"))
+    if t_low is not None and t_high is not None and t_low > t_high:
+        t_low, t_high = t_high, t_low
+
+    if legacy_center is None and t_low is not None and t_high is not None:
+        legacy_center = (t_low + t_high) / 2.0
+    if review_band is None:
+        if t_low is not None and t_high is not None:
+            review_band = (t_high - t_low) / 2.0
+        else:
+            review_band = 0.08
+    review_band = _clip(float(review_band), 0.02, 0.30)
+
+    out: dict[str, Any] = {
+        "class_key": class_key,
+        "source": source,
+        "reliability": reliability,
+        "review_band": review_band,
+        "legacy_center": legacy_center,
+    }
+    if t_low is not None:
+        out["t_low"] = float(t_low)
+    if t_high is not None:
+        out["t_high"] = float(t_high)
+    return out
+
+
+def _resolve_class_policy_from_bounds(raw: dict[str, Any], class_key: str) -> dict[str, Any]:
+    t_low = _safe_float(raw.get("t_low"))
+    t_high = _safe_float(raw.get("t_high"))
+    if t_low is not None and t_high is not None and t_low > t_high:
+        t_low, t_high = t_high, t_low
+
+    if t_low is None:
+        t_low = 0.5
+    if t_high is None:
+        t_high = 0.8
+    if t_high <= t_low:
+        center = _clip((t_low + t_high) / 2.0, 0.0, 1.0)
+        t_low = _clip(center - 0.05, 0.0, 1.0)
+        t_high = _clip(center + 0.05, 0.0, 1.0)
+
+    return {
+        "class_key": class_key,
+        "source": str(raw.get("source", "default")),
+        "reliability": "medium",
+        "review_band": _clip((t_high - t_low) / 2.0, 0.02, 0.30),
+        "legacy_center": (t_low + t_high) / 2.0,
+        "t_low": float(t_low),
+        "t_high": float(t_high),
+    }
+
+
+def _resolve_class_calibration(doc: dict[str, Any], class_key: str) -> dict[str, Any]:
+    if not isinstance(doc, dict):
+        return {}
+    classes = doc.get("classes")
+    if not isinstance(classes, dict):
+        return {}
+    raw = classes.get(class_key)
+    if not isinstance(raw, dict):
+        return {}
+
+    center = (
+        _safe_float(raw.get("center_threshold"))
+        or _safe_float(raw.get("decision_threshold"))
+        or _safe_float(raw.get("threshold_opt"))
+    )
+    review_band = (
+        _safe_float(raw.get("review_band"))
+        or _safe_float(raw.get("uncertainty_band"))
+        or _safe_float(raw.get("decision_band"))
+    )
+
+    out: dict[str, Any] = {}
+    if center is not None:
+        out["center_threshold"] = float(center)
+    if review_band is not None:
+        out["review_band"] = _clip(float(review_band), 0.02, 0.30)
+    return out
+
+
+def _decide_with_policy(
+    anomaly_score: float,
+    class_policy: dict[str, Any],
+    *,
+    model_threshold: float,
+    class_calibration: dict[str, Any] | None = None,
+) -> tuple[str, bool, dict[str, Any]]:
+    calibration = class_calibration or {}
+    center = _safe_float(calibration.get("center_threshold"))
+    if center is None:
+        center = _safe_float(class_policy.get("legacy_center"))
+    if center is None:
+        center = float(model_threshold)
+    center = _clip(float(center), 0.0, 1.0)
+
+    base_band = _safe_float(class_policy.get("review_band"))
+    if base_band is None:
+        base_band = 0.08
+    calib_band = _safe_float(calibration.get("review_band"))
+    if calib_band is not None:
+        base_band = max(float(base_band), float(calib_band))
+
+    reliability = str(class_policy.get("reliability", "medium")).lower()
+    reliability_scale = {"high": 0.9, "medium": 1.0, "low": 1.3}.get(reliability, 1.0)
+    uncertainty_band = _clip(float(base_band) * reliability_scale, 0.02, 0.35)
+
+    score_delta = float(anomaly_score) - center
+    if score_delta > uncertainty_band:
+        decision = "anomaly"
+        review_needed = False
+    elif score_delta < -uncertainty_band:
+        decision = "normal"
+        review_needed = False
+    else:
+        decision = "review_needed"
+        review_needed = True
+
+    decision_confidence = round(
+        _clip(abs(score_delta) / max(1e-6, uncertainty_band * 2.5), 0.0, 1.0),
+        4,
+    )
+    return decision, review_needed, {
+        "decision_confidence": decision_confidence,
+        "basis": {
+            "center_threshold": round(center, 4),
+            "uncertainty_band": round(float(uncertainty_band), 4),
+            "score_delta": round(float(score_delta), 4),
+            "used_calibration": bool(calibration),
+        },
+    }
+
+
 def _set_llm_model(app: FastAPI, model_name: str) -> None:
     selected = model_name.strip()
     if not selected:
@@ -113,6 +330,28 @@ def _checkpoint_exists_for_category_key(category_key: str) -> bool:
     return False
 
 
+def _discover_model_category_key(category: str) -> str | None:
+    selected = category.strip().strip("/")
+    if not selected or "/" in selected:
+        return None
+
+    roots = [CHECKPOINT_DIR / "Patchcore", CHECKPOINT_DIR]
+    seen: set[Path] = set()
+    for root in roots:
+        if root in seen or not root.exists():
+            continue
+        seen.add(root)
+
+        dataset_dirs = sorted([d for d in root.iterdir() if d.is_dir()], key=lambda p: p.name)
+        for ds_dir in dataset_dirs:
+            if ds_dir.name.startswith("."):
+                continue
+            candidate = f"{ds_dir.name}/{selected}"
+            if _checkpoint_exists_for_category_key(candidate):
+                return candidate
+    return None
+
+
 def _resolve_model_category(dataset: str, category: str) -> str:
     selected = category.strip()
     if not selected:
@@ -125,6 +364,9 @@ def _resolve_model_category(dataset: str, category: str) -> str:
         candidate = f"{ds}/{selected}"
         if _checkpoint_exists_for_category_key(candidate):
             return candidate
+    discovered = _discover_model_category_key(selected)
+    if discovered:
+        return discovered
     return selected
 
 
@@ -141,7 +383,9 @@ def _normalize_line(raw: str | None) -> str | None:
 
     m = LINE_PATTERN.search(s)
     if not m:
-        return s
+        if len(s) == 1 and s.isalpha():
+            return f"LINE-{s.upper()}-01"
+        return None
 
     token = m.group(1).upper()
     if len(token) == 1 and token.isalpha():
@@ -155,17 +399,32 @@ def _resolve_incoming_context(image_path: Path) -> tuple[str, str, str] | None:
     except ValueError:
         rel_parts = image_path.parts
 
-    dataset = rel_parts[0] if len(rel_parts) >= 1 else INCOMING_DEFAULT_DATASET
-    category = rel_parts[1] if len(rel_parts) >= 2 else INCOMING_DEFAULT_CATEGORY
+    # rel_parts includes filename as the last element.
+    dir_parts = rel_parts[:-1] if len(rel_parts) >= 1 else ()
+
+    dataset = INCOMING_DEFAULT_DATASET
+    category = INCOMING_DEFAULT_CATEGORY
+
+    if len(dir_parts) >= 2:
+        dataset = dir_parts[0] or INCOMING_DEFAULT_DATASET
+        category = dir_parts[1] or INCOMING_DEFAULT_CATEGORY
+    elif len(dir_parts) == 1:
+        # incoming/{batch}/image.png 형태: dataset/category는 default env 사용.
+        dataset = INCOMING_DEFAULT_DATASET or dir_parts[0]
+        category = INCOMING_DEFAULT_CATEGORY
 
     line: str | None = None
     # 권장 구조: incoming/{dataset}/{category}/{line}/{batch}/image.png
-    if len(rel_parts) >= 3:
-        line = _normalize_line(rel_parts[2])
+    if len(dir_parts) >= 3:
+        line = _normalize_line(dir_parts[2])
 
     # line 디렉토리가 없으면 하위 경로(배치명 등)에서 line token 추출
-    if line is None and len(rel_parts) >= 3:
-        for token in reversed(rel_parts[2:-1]):  # 파일명 제외
+    if line is None:
+        if len(dir_parts) >= 3:
+            tokens = list(dir_parts[2:])
+        else:
+            tokens = list(dir_parts)
+        for token in reversed(tokens):
             line = _normalize_line(token)
             if line is not None:
                 break
@@ -209,9 +468,16 @@ def _run_inspection_pipeline(
     ingest_source_path: str | None,
 ) -> dict[str, Any]:
     model_category = _resolve_model_category(dataset=dataset, category=category)
-    policy = pg.get_category_policy(conn, model_category)
-    t_low = float(policy.get("t_low", 0.5))
-    t_high = float(policy.get("t_high", 0.8))
+    class_keys = _candidate_class_keys(dataset=dataset, model_category=model_category)
+
+    policy: dict[str, Any] | None = None
+    for key in class_keys:
+        policy = _resolve_class_policy_from_json(getattr(app.state, "ad_policy_doc", {}), key)
+        if policy is not None:
+            break
+    if policy is None:
+        db_policy = pg.get_category_policy(conn, model_category)
+        policy = _resolve_class_policy_from_bounds(db_policy, model_category)
     policy_source = str(policy.get("source", "default"))
 
     if hasattr(file_obj, "file"):
@@ -224,50 +490,54 @@ def _run_inspection_pipeline(
             [file_obj],
             category=model_category,
             dataset=dataset,
-            threshold=t_low,
+            threshold=None,
         )
     ad_result = ad_results[0]
     score = float(ad_result["ad_score"])
-    model_thr = float(ad_result.get("model_threshold", t_low))
+    model_thr = float(ad_result.get("model_threshold", 0.5))
     model_is_anomaly = bool(ad_result.get("model_is_anomaly", score > model_thr))
 
-    # category metadata가 없으면 run_ad_inference 기본 흐름처럼
-    # model threshold 중심의 review band를 사용한다.
-    if policy_source != "category_metadata":
-        center = max(0.0, min(1.0, model_thr))
-        band = 0.08
-        t_low = max(0.0, center - band)
-        t_high = min(1.0, center + band)
+    calibration: dict[str, Any] = {}
+    for key in class_keys:
+        calibration = _resolve_class_calibration(getattr(app.state, "ad_calibration_doc", {}), key)
+        if calibration:
+            break
 
-    # 정책 파일이 잘못 들어간 경우(all anomaly/normal 쏠림) 방어.
-    if t_high <= t_low or not (0.0 <= t_low <= 1.0 and 0.0 <= t_high <= 1.0):
-        logger.warning(
-            "Invalid policy band for %s (t_low=%.4f, t_high=%.4f). source=%s fallback to model threshold band.",
-            model_category,
-            t_low,
-            t_high,
-            policy_source,
-        )
-        center = max(0.0, min(1.0, model_thr))
-        t_low = max(0.0, center - 0.05)
-        t_high = min(1.0, center + 0.05)
-
-    if score < t_low:
-        ad_decision = "normal"
-    elif score > t_high:
-        ad_decision = "anomaly"
-    else:
-        ad_decision = "review_needed"
+    ad_decision, review_needed, decision_meta = _decide_with_policy(
+        score,
+        policy,
+        model_threshold=model_thr,
+        class_calibration=calibration,
+    )
+    basis = decision_meta.get("basis", {})
+    center = _clip(float(_safe_float(basis.get("center_threshold")) or model_thr), 0.0, 1.0)
+    band = _clip(float(_safe_float(basis.get("uncertainty_band")) or policy.get("review_band", 0.08)), 0.02, 0.35)
+    t_low = _clip(center - band, 0.0, 1.0)
+    t_high = _clip(center + band, 0.0, 1.0)
+    applied_policy = {
+        "class_key": str(policy.get("class_key", model_category)),
+        "source": policy_source,
+        "reliability": str(policy.get("reliability", "medium")),
+        "review_band": round(float(policy.get("review_band", band)), 4),
+        "t_low": round(float(t_low), 4),
+        "t_high": round(float(t_high), 4),
+        "decision_basis": basis,
+        "used_calibration": bool(calibration),
+    }
 
     logger.info(
-        "AD decision | category=%s score=%.4f band=[%.4f, %.4f] source=%s model_thr=%.4f model_is_anomaly=%s decision=%s",
+        "AD decision | category=%s score=%.4f center=%.4f band=%.4f range=[%.4f, %.4f] "
+        "source=%s model_thr=%.4f model_is_anomaly=%s review_needed=%s decision=%s",
         model_category,
         score,
+        center,
+        band,
         t_low,
         t_high,
         policy_source,
         model_thr,
         model_is_anomaly,
+        review_needed,
         ad_decision,
     )
 
@@ -277,7 +547,7 @@ def _run_inspection_pipeline(
         "line": line,
         "ad_score": score,
         "ad_decision": ad_decision,
-        "is_anomaly_ad": score > t_high,
+        "is_anomaly_ad": ad_decision == "anomaly",
         "has_defect": ad_result.get("has_defect", False),
         "region": ad_result.get("region"),
         "area_ratio": ad_result.get("area_ratio"),
@@ -291,7 +561,7 @@ def _run_inspection_pipeline(
         "overlay_path": ad_result["overlay_path"],
         "created_at": ad_start_time,
         "ad_inference_duration": (datetime.now() - ad_start_time).total_seconds(),
-        "applied_policy": policy,
+        "applied_policy": applied_policy,
     }
     report_id = pg.insert_report(conn, initial_data)
 
@@ -357,6 +627,9 @@ def _scan_incoming_once(app: FastAPI) -> int:
 
     conn = pg.connect_fast(DATABASE_URL)
     processed = 0
+    skipped_existing = 0
+    skipped_unresolved = 0
+    failed = 0
     try:
         for image_path in _collect_incoming_images(INCOMING_ROOT):
             if not _is_stable_file(image_path):
@@ -364,14 +637,17 @@ def _scan_incoming_once(app: FastAPI) -> int:
 
             source_path = str(image_path.resolve())
             if pg.has_ingest_source_path(conn, source_path):
+                skipped_existing += 1
                 continue
 
             resolved = _resolve_incoming_context(image_path)
             if resolved is None:
+                skipped_unresolved += 1
                 unresolved: set[str] = app.state.incoming_unresolved
                 if source_path not in unresolved:
                     logger.warning(
-                        "Skipping incoming image without category mapping: %s (use incoming/{dataset}/{category}/... structure or set INCOMING_DEFAULT_CATEGORY)",
+                        "Skipping incoming image without category mapping: %s "
+                        "(use incoming/{dataset}/{category}/... structure or set INCOMING_DEFAULT_CATEGORY)",
                         source_path,
                     )
                     unresolved.add(source_path)
@@ -397,10 +673,19 @@ def _scan_incoming_once(app: FastAPI) -> int:
                     conn.rollback()
                 except Exception:
                     pass
+                failed += 1
                 logger.exception("Incoming image processing failed: %s", source_path)
             finally:
                 local_file.close()
 
+        if processed > 0 or failed > 0 or skipped_unresolved > 0:
+            logger.info(
+                "Incoming scan summary | processed=%d skipped_existing=%d unresolved=%d failed=%d",
+                processed,
+                skipped_existing,
+                skipped_unresolved,
+                failed,
+            )
         return processed
     finally:
         conn.close()
@@ -436,6 +721,8 @@ async def lifespan(app: FastAPI):
         checkpoint_dir=str(CHECKPOINT_DIR),
         output_root=str(OUTPUT_DIR),
     )
+    app.state.ad_policy_doc = _load_ad_policy_doc(AD_POLICY_PATH)
+    app.state.ad_calibration_doc = _load_ad_calibration_doc(AD_CALIBRATION_PATH)
     app.state.rag_service = RagService(index_dir=str(RAG_INDEX_DIR))
     _set_llm_model(app, MODEL_NAME)
     app.state.inspect_lock = threading.Lock()

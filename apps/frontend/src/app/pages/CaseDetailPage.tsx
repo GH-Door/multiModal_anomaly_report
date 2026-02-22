@@ -51,8 +51,64 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
     return isNaN(d.getTime()) ? "N/A" : d.toLocaleString("ko-KR");
   }, [caseData.timestamp]);
 
-  const llmSummary = String(caseData.llm_summary ?? "").trim();
-  const isLlmComplete = llmSummary.length > 0;
+  const llmView = useMemo(() => {
+    const source = (caseData.llm_structured_json as any)?.source ?? {};
+
+    const asObj = (v: any) => {
+      if (!v) return {};
+      if (typeof v === "object") return v;
+      if (typeof v === "string") {
+        const s = v.trim();
+        if (!s) return {};
+        try {
+          return JSON.parse(s);
+        } catch {
+          return { _text: s };
+        }
+      }
+      return {};
+    };
+    const pick = (...values: any[]) => {
+      for (const v of values) {
+        if (typeof v === "string" && v.trim()) return v.trim();
+      }
+      return "";
+    };
+
+    const llmReportRoot = asObj(source.llm_report);
+    const llmReport = asObj(llmReportRoot.report ?? llmReportRoot);
+    const llmSummaryObj = asObj(source.llm_summary);
+
+    const summary = pick(
+      caseData.llm_summary,
+      llmSummaryObj.summary,
+      llmSummaryObj._text,
+      llmReport.summary,
+      source.summary
+    );
+    const description = pick(
+      llmReport.description,
+      source.defect_description,
+      source.description
+    );
+    const cause = pick(
+      llmReport.possible_cause,
+      llmReport.cause,
+      llmReport.likely_cause,
+      source.possible_cause
+    );
+    const recommendation = pick(
+      llmReport.recommendation,
+      source.recommendation
+    );
+    return { summary, description, cause, recommendation };
+  }, [caseData.llm_structured_json, caseData.llm_summary]);
+
+  const isLlmComplete =
+    llmView.summary.length > 0 ||
+    llmView.description.length > 0 ||
+    llmView.cause.length > 0 ||
+    llmView.recommendation.length > 0;
 
   return (
     <div className="p-8 bg-white min-h-screen">
@@ -130,13 +186,22 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
               </label>
               
               {isLlmComplete ? (
-                <p className="text-sm text-blue-900 leading-relaxed whitespace-pre-wrap">
-                  {llmSummary}
-                </p>
+                <div className="space-y-3 text-sm text-blue-900 leading-relaxed">
+                  <p className="whitespace-pre-wrap">{llmView.summary}</p>
+                  {llmView.description && (
+                    <p><span className="font-semibold">상세 분석:</span> {llmView.description}</p>
+                  )}
+                  {llmView.cause && (
+                    <p><span className="font-semibold">원인 추정:</span> {llmView.cause}</p>
+                  )}
+                  {llmView.recommendation && (
+                    <p><span className="font-semibold">권고 조치:</span> {llmView.recommendation}</p>
+                  )}
+                </div>
               ) : (
                 <div className="flex items-center gap-3 py-2">
-                  <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />
-                  <p className="text-sm text-blue-700 font-medium italic">실시간 심층 분석 진행 중 (RAG & LLM)...</p>
+                  <Loader2 className="w-4 h-4 text-blue-500" />
+                  <p className="text-sm text-blue-700 font-medium italic">LLM 분석 결과가 아직 없습니다. (생성 실패 또는 미완료)</p>
                 </div>
               )}
             </div>

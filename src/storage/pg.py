@@ -278,7 +278,10 @@ def get_filtered_reports(
             mask_path,
             overlay_path,
             ad_inference_duration,
+            is_anomaly_llm,
+            llm_report,
             llm_summary,
+            llm_inference_duration,
             applied_policy,
             created_at
         """

@@ -64,11 +64,12 @@ Respond in JSON format ONLY:
     "severity": "low/medium/high/none",
     "location": "where the defect is or none",
     "description": "detailed defect description or normal product",
+    "possible_cause": "most likely root cause of the defect or none",
     "confidence": 0.0 to 1.0,
-    "recommendation": "action recommendation"
+    "recommendation": "specific corrective/preventive actions"
   }},
   "summary": {{
-    "summary": "one sentence inspection summary",
+    "summary": "2-3 concise sentences including judgement, key evidence, and urgency",
     "risk_level": "low/medium/high/none"
   }}
 }}'''
@@ -96,11 +97,12 @@ Respond in JSON format ONLY:
     "severity": "low/medium/high/none",
     "location": "where the defect is or none",
     "description": "detailed defect description or normal product",
+    "possible_cause": "most likely root cause of the defect or none",
     "confidence": 0.0 to 1.0,
-    "recommendation": "action recommendation"
+    "recommendation": "specific corrective/preventive actions"
   }},
   "summary": {{
-    "summary": "one sentence inspection summary",
+    "summary": "2-3 concise sentences including judgement, key evidence, and urgency",
     "risk_level": "low/medium/high/none"
   }}
 }}'''
