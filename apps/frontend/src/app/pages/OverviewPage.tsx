@@ -1,12 +1,11 @@
 // src/app/pages/OverviewPage.tsx
 import React, { useMemo } from "react";
-import type { AnomalyCase } from "../data/mockData";
-import type { Alert } from "../data/AlertData";
+// import type { AnomalyCase } from "../data/mockData";
+// import type { Alert } from "../data/AlertData";
 import {
   Activity,
   AlertTriangle,
   CheckCircle,
-  Clock,
   AlertOctagon,
   FileText,
   Search,
@@ -84,8 +83,6 @@ export function OverviewPage({ cases, alerts, activeModel }: OverviewPageProps) 
 
   const defectRate = agg.total ? ((agg.ng / agg.total) * 100).toFixed(1) : "0.0";
   const reviewRate = agg.total ? ((agg.review / agg.total) * 100).toFixed(1) : "0.0";
-  const avgInference = agg.total ? Math.round(agg.avgInference) : 0;
-
   const hourlyTrend = useMemo(() => toHourlyDecisionTrend(agg), [agg]);
 
   const getAlertIcon = (type: Alert["type"]) => {
@@ -110,11 +107,10 @@ export function OverviewPage({ cases, alerts, activeModel }: OverviewPageProps) 
         <p className="text-gray-500 mt-1">실시간 품질 검사 현황 및 이상 탐지 결과</p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         <KPICard title="검사 수" value={agg.total.toLocaleString()} subtext="오늘 누적 검사량" icon={Activity} />
         <KPICard title="불량률" value={`${defectRate}%`} subtext="오늘 검사 대비 불량" icon={AlertTriangle} />
         <KPICard title="재검률" value={`${reviewRate}%`} subtext="AI 판정 보류 건" icon={CheckCircle} />
-        <KPICard title="평균 추론 시간" value={`${avgInference}ms`} subtext={activeModel} icon={Clock} />
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">

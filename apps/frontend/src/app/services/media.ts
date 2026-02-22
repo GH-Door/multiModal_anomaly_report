@@ -1,5 +1,4 @@
 // src/app/services/media.ts
-import type { AnomalyCase } from "../data/mockData";
 import { API_BASE } from "../api/http";
 
 export type ImageVariant = "original" | "heatmap" | "overlay";

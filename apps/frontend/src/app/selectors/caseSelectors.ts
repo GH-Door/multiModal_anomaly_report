@@ -26,7 +26,6 @@ export function buildAggregates(cases: AnomalyCase[]) {
   let ok = 0;
 
   let sumScore = 0;
-  let sumInference = 0;
 
   const hourly = Array.from({ length: 24 }, () => ({
     total: 0,
@@ -43,7 +42,6 @@ export function buildAggregates(cases: AnomalyCase[]) {
 
   for (const c of cases) {
     sumScore += c.anomaly_score;
-    sumInference += c.inference_time_ms;
 
     const h = c.timestamp.getHours();
     hourly[h].total += 1;
@@ -74,7 +72,6 @@ export function buildAggregates(cases: AnomalyCase[]) {
     review,
     ok,
     avgScore: total ? sumScore / total : 0,
-    avgInference: total ? sumInference / total : 0,
     hourly,
     defectTypeCounts,
     productNgCounts,
