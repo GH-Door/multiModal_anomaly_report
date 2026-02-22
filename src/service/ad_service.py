@@ -385,10 +385,30 @@ class AdService:
             )
 
         Image.fromarray(mask).save(m_path)
-        highlight = input_img.copy()
-        highlight[mask > 0] = [255, 0, 0]
-        mask_overlay = cv2.addWeighted(input_img, 0.7, highlight, 0.3, 0)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(mask_overlay, contours, -1, (255, 0, 0), 2)
-        Image.fromarray(mask_overlay).save(o_path)
+
+        # Overlay는 AD JSON(bbox) 기준으로 시각화한다.
+        bbox_overlay = input_img.copy()
+        bbox = loc.get("bbox")
+        if isinstance(bbox, list) and len(bbox) == 4:
+            x0, y0, x1, y1 = [int(v) for v in bbox]
+            x0 = max(0, min(w - 1, x0))
+            x1 = max(0, min(w - 1, x1))
+            y0 = max(0, min(h - 1, y0))
+            y1 = max(0, min(h - 1, y1))
+            if x1 > x0 and y1 > y0:
+                fill = bbox_overlay.copy()
+                cv2.rectangle(fill, (x0, y0), (x1, y1), (255, 0, 0), thickness=-1)
+                bbox_overlay = cv2.addWeighted(bbox_overlay, 0.88, fill, 0.12, 0)
+                cv2.rectangle(bbox_overlay, (x0, y0), (x1, y1), (255, 0, 0), thickness=2)
+                cv2.putText(
+                    bbox_overlay,
+                    "AD BBox",
+                    (x0, max(18, y0 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 0, 0),
+                    1,
+                    cv2.LINE_AA,
+                )
+        Image.fromarray(bbox_overlay).save(o_path)
         return loc

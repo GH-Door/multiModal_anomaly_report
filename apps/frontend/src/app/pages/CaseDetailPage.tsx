@@ -101,7 +101,12 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
       llmReport.recommendation,
       source.recommendation
     );
-    return { summary, description, cause, recommendation };
+    const pipelineStatus = String(
+      source.pipeline_status ?? caseData.pipeline_status ?? ""
+    ).toLowerCase();
+    const pipelineStage = String(source.pipeline_stage ?? caseData.pipeline_stage ?? "");
+    const pipelineError = pick(source.pipeline_error, caseData.pipeline_error);
+    return { summary, description, cause, recommendation, pipelineStatus, pipelineStage, pipelineError };
   }, [caseData.llm_structured_json, caseData.llm_summary]);
 
   const isLlmComplete =
@@ -109,6 +114,8 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
     llmView.description.length > 0 ||
     llmView.cause.length > 0 ||
     llmView.recommendation.length > 0;
+  const isLlmProcessing = llmView.pipelineStatus === "processing";
+  const isLlmFailed = llmView.pipelineStatus === "failed";
 
   return (
     <div className="p-8 bg-white min-h-screen">
@@ -200,8 +207,14 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
                 </div>
               ) : (
                 <div className="flex items-center gap-3 py-2">
-                  <Loader2 className="w-4 h-4 text-blue-500" />
-                  <p className="text-sm text-blue-700 font-medium italic">LLM 분석 결과가 아직 없습니다. (생성 실패 또는 미완료)</p>
+                  <Loader2 className={`w-4 h-4 text-blue-500 ${isLlmProcessing ? "animate-spin" : ""}`} />
+                  <p className="text-sm text-blue-700 font-medium italic">
+                    {isLlmFailed
+                      ? `LLM 분석 실패${llmView.pipelineError ? `: ${llmView.pipelineError}` : ""}`
+                      : isLlmProcessing
+                        ? "LLM 분석 진행 중..."
+                        : "LLM 분석 결과가 아직 없습니다. (생성 실패 또는 미완료)"}
+                  </p>
                 </div>
               )}
             </div>
@@ -240,17 +253,25 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
                   </div>
 
                   <div className="flex gap-3">
-                    <div className={`w-1.5 h-1.5 rounded-full mt-1.5 ${isLlmComplete ? 'bg-green-500' : 'bg-gray-200'}`}></div>
+                    <div className={`w-1.5 h-1.5 rounded-full mt-1.5 ${
+                      isLlmComplete ? 'bg-green-500' : isLlmFailed ? 'bg-red-400' : 'bg-blue-400'
+                    }`}></div>
                     <div>
-                      <p className={`text-sm font-semibold ${isLlmComplete ? 'text-gray-900' : 'text-gray-300'}`}>
-                        최종 판정 기록 완료
+                      <p className={`text-sm font-semibold ${
+                        isLlmComplete ? 'text-gray-900' : isLlmFailed ? 'text-red-600' : 'text-blue-700'
+                      }`}>
+                        {isLlmComplete ? "최종 판정 기록 완료" : isLlmFailed ? "LLM 분석 실패" : "LLM 분석 진행 중"}
                       </p>
                       {isLlmComplete ? (
                         <p className="text-[11px] text-gray-500 mt-0.5">데이터베이스 동기화 성공</p>
                       ) : (
                         <div className="flex items-center gap-1.5 mt-1">
-                          <span className="inline-block w-1 h-1 bg-gray-400 rounded-full animate-bounce"></span>
-                          <p className="text-[11px] text-blue-500 font-medium tracking-tight">AI 분석 결과 대기 중...</p>
+                          {!isLlmFailed && <span className="inline-block w-1 h-1 bg-blue-400 rounded-full animate-bounce"></span>}
+                          <p className={`text-[11px] font-medium tracking-tight ${isLlmFailed ? "text-red-500" : "text-blue-500"}`}>
+                            {isLlmFailed
+                              ? (llmView.pipelineError || "로그를 확인해주세요.")
+                              : (llmView.pipelineStage || "AI 분석 결과 대기 중...")}
+                          </p>
                         </div>
                       )}
                     </div>

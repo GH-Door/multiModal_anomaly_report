@@ -32,6 +32,9 @@ export type ReportDTO = {
 
   heatmap_path?: string | null;
   overlay_path?: string | null;
+  pipeline_status?: string | null;
+  pipeline_stage?: string | null;
+  pipeline_error?: string | null;
 
 };
 
@@ -134,15 +137,22 @@ function normalizeRemoteToReportDTO(x: any, idx: number): ReportDTO {
   const llm = x?.llm_report ?? {};
   const sum = x?.llm_summary ?? {};
 
-  // decision 우선순위: ad_decision -> decision -> is_anomaly_llm
+  // decision 우선순위: is_anomaly_llm -> (processing이면 review) -> ad_decision
+  const pipelineStatus = String(x?.pipeline_status ?? "").toLowerCase();
+  const llmFlag =
+    typeof x?.is_anomaly_llm === "boolean" ? x.is_anomaly_llm : null;
   const decision =
-    typeof x?.ad_decision === "string"
-      ? x.ad_decision
-      : typeof x?.decision === "string"
-        ? x.decision
-        : x?.is_anomaly_llm === true
-          ? "ng"
-          : "ok";
+    llmFlag === true
+      ? "ng"
+      : llmFlag === false
+        ? "ok"
+        : pipelineStatus === "processing"
+          ? "review_needed"
+          : typeof x?.ad_decision === "string"
+            ? x.ad_decision
+            : typeof x?.decision === "string"
+              ? x.decision
+              : "review_needed";
 
   const hasDefect =
     typeof x?.has_defect === "number"
@@ -209,6 +219,10 @@ function normalizeRemoteToReportDTO(x: any, idx: number): ReportDTO {
     ad_inference_duration: x?.ad_inference_duration ?? null,
     llm_report: x?.llm_report ?? null,
     llm_summary: x?.llm_summary ?? null,
+    is_anomaly_llm: x?.is_anomaly_llm ?? null,
+    pipeline_status: pipelineStatus || null,
+    pipeline_stage: x?.pipeline_stage ?? null,
+    pipeline_error: x?.pipeline_error ?? null,
   } as ReportDTO & Record<string, unknown>;
 
   return item;

@@ -85,7 +85,8 @@ function toShift(d: Date): string {
 function normalizeDefectType(
   raw?: string,
   decision?: "OK" | "NG" | "REVIEW",
-  hintText?: string
+  hintText?: string,
+  category?: string
 ): string {
   if (decision === "OK") return "none";
   const v = (raw ?? "").trim().toLowerCase().replace(/\s+/g, "_").replace(/-/g, "_");
@@ -124,11 +125,19 @@ function normalizeDefectType(
   if (v && map[v]) return map[v];
 
   const text = `${v} ${(hintText ?? "").toLowerCase()}`;
-  if (/(seal|sealing|실링|밀봉|개봉)/.test(text)) return "seal_issue";
+  if (/(seal|sealing|unseal|unsealed|open|opened|opening|flap|lid|cap|실링|밀봉|개봉|열림|벌어짐|뜯김)/.test(text)) {
+    return "seal_issue";
+  }
   if (/(contamin|foreign|dust|stain|smudge|오염|이물|얼룩)/.test(text)) return "contamination";
   if (/(crack|fracture|broken|damage|tear|파손|균열|찢)/.test(text)) return "crack";
   if (/(missing|absence|lost|누락|결손|빠짐|없)/.test(text)) return "missing_component";
   if (/(scratch|scuff|abrasion|스크래치|긁힘)/.test(text)) return "scratch";
+
+  const cat = (category ?? "").toLowerCase();
+  if (cat.includes("cigarette_box")) {
+    // 담배곽은 개봉/실링 이슈 비중이 높아서 기본 fallback을 contamination이 아닌 seal_issue로 둔다.
+    return "seal_issue";
+  }
 
   if (["none", "normal", "ok", "good", "no_defect", "no-defect", ""].includes(v)) {
     return decision === "OK" ? "none" : "contamination";
@@ -170,6 +179,31 @@ function normalizeDecision(decisionRaw?: string): "OK" | "NG" | "REVIEW" {
   return "REVIEW"; // review_needed 포함
 }
 
+function normalizeDecisionFromLlm(
+  row: any,
+  llmReport: any
+): "OK" | "NG" | "REVIEW" {
+  const llmFlagRaw =
+    row?.is_anomaly_llm ??
+    row?.is_anomaly_LLM ??
+    llmReport?.is_anomaly;
+
+  if (typeof llmFlagRaw === "boolean") {
+    return llmFlagRaw ? "NG" : "OK";
+  }
+  if (typeof llmFlagRaw === "string") {
+    const v = llmFlagRaw.trim().toLowerCase();
+    if (["true", "1", "yes", "anomaly", "ng", "defect", "bad", "불량", "이상"].includes(v)) return "NG";
+    if (["false", "0", "no", "normal", "ok", "good", "정상"].includes(v)) return "OK";
+  }
+
+  const st = String(row?.pipeline_status ?? "").toLowerCase();
+  if (st === "processing" || st === "pending") return "REVIEW";
+  if (st === "failed") return "REVIEW";
+  // 최종 판정 기준은 LLM only.
+  return "REVIEW";
+}
+
 function normalizeSeverity(raw?: string, decision?: "OK" | "NG" | "REVIEW"): "low" | "med" | "high" {
   if (decision && decision !== "NG") return "low";
   const s = (raw ?? "").trim().toLowerCase();
@@ -191,7 +225,6 @@ function toActionLog(decision: "OK" | "NG" | "REVIEW", ts: Date): ActionLog[] {
 export function mapReportsToAnomalyCases(raw: any[]): AnomalyCase[] {
   return raw.map((r, idx) => {
     const ts = parseDatetime(r.created_at) ?? parseDatetime(r.datetime) ?? new Date();
-    const decision = normalizeDecision(r.ad_decision ?? r.decision);
 
     const dataset = r.dataset ?? "UNKNOWN";
     const category = r.category ?? "unknown";
@@ -199,6 +232,7 @@ export function mapReportsToAnomalyCases(raw: any[]): AnomalyCase[] {
     const llmReportRoot: any = parseJsonLike(r.llm_report);
     const llmReport: any = parseJsonLike(llmReportRoot.report ?? llmReportRoot);
     const llmSummaryObj: any = parseJsonLike(r.llm_summary);
+    const decision = normalizeDecisionFromLlm(r, llmReport);
 
     const defectType = normalizeDefectType(
       pickString([
@@ -212,10 +246,12 @@ export function mapReportsToAnomalyCases(raw: any[]): AnomalyCase[] {
       pickString([
         llmReport.description,
         llmReport.recommendation,
+        llmReport.raw_response,
         llmSummaryObj.summary,
         llmSummaryObj._text,
         r.defect_description,
-      ])
+      ]),
+      category
     );
     const loc = normalizeLocation(
       pickString([
@@ -230,6 +266,25 @@ export function mapReportsToAnomalyCases(raw: any[]): AnomalyCase[] {
     const severity = normalizeSeverity(llmReport.severity, decision);
     const adScore = toNumber(r.ad_score) ?? toNumber(r.confidence) ?? 0;
     const areaRatio = toNumber(r.area_ratio) ?? 0;
+    const pipelineStatus = String(r.pipeline_status ?? "").toLowerCase();
+    const pipelineStage = String(r.pipeline_stage ?? "");
+    const pipelineError = typeof r.pipeline_error === "string" ? r.pipeline_error : "";
+
+    const llmSummary = pickString([
+      llmSummaryObj.summary,
+      llmSummaryObj._text,
+      llmReport.summary,
+      llmReport.description,
+      llmReport.raw_response,
+      r.summary,
+    ]) ?? "";
+    const llmSummaryDisplay =
+      llmSummary ||
+      (pipelineStatus === "processing"
+        ? "LLM 분석 진행 중입니다."
+        : pipelineStatus === "failed"
+          ? `LLM 분석 실패: ${pipelineError || "원인 미상"}`
+          : "");
 
     return {
       id: `CASE-${r.id || idx}`,
@@ -263,15 +318,11 @@ export function mapReportsToAnomalyCases(raw: any[]): AnomalyCase[] {
           : (typeof r.inference_time === "number" ? Math.round(r.inference_time * 1000) : 0),
 
       // LLM 요약 매핑
-      llm_summary:
-        pickString([
-          llmSummaryObj.summary,
-          llmSummaryObj._text,
-          llmReport.summary,
-          llmReport.description,
-          r.summary,
-        ]) ?? "",
+      llm_summary: llmSummaryDisplay,
 
+      pipeline_status: pipelineStatus || undefined,
+      pipeline_stage: pipelineStage || undefined,
+      pipeline_error: pipelineError || undefined,
       llm_structured_json: { source: r },
       operator_note: typeof r.llm_report === "string" ? r.llm_report.trim() : "",
       action_log: toActionLog(decision, ts),

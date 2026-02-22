@@ -38,8 +38,12 @@ CREATE TABLE IF NOT EXISTS inspection_reports (
   llm_summary            JSONB,
   llm_start_time         TIMESTAMP,
   llm_inference_duration FLOAT,
+  pipeline_status        VARCHAR(30) DEFAULT 'processing',
+  pipeline_stage         VARCHAR(30) DEFAULT 'ad_done',
+  pipeline_error         TEXT,
   applied_policy         JSONB DEFAULT '{}'::jsonb,
-  created_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -65,6 +69,7 @@ CREATE INDEX IF NOT EXISTS idx_reports_category ON inspection_reports(category);
 CREATE INDEX IF NOT EXISTS idx_reports_decision ON inspection_reports(ad_decision);
 CREATE INDEX IF NOT EXISTS idx_reports_created ON inspection_reports(created_at);
 CREATE INDEX IF NOT EXISTS idx_reports_ingest_source_path ON inspection_reports(ingest_source_path);
+CREATE INDEX IF NOT EXISTS idx_reports_pipeline_status ON inspection_reports(pipeline_status);
 """
 
 ALTER_REPORT_COLUMNS_SQL = [
@@ -79,6 +84,10 @@ ALTER_REPORT_COLUMNS_SQL = [
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS overlay_path TEXT;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS applied_policy JSONB DEFAULT '{}'::jsonb;",
     "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS pipeline_status VARCHAR(30) DEFAULT 'processing';",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS pipeline_stage VARCHAR(30) DEFAULT 'ad_done';",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS pipeline_error TEXT;",
+    "ALTER TABLE inspection_reports ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
 ]
 
 DEFAULT_POLICY = {"t_low": 0.5, "t_high": 0.8}
@@ -109,8 +118,12 @@ ALLOWED_COLUMNS = {
     "llm_summary",
     "llm_start_time",
     "llm_inference_duration",
+    "pipeline_status",
+    "pipeline_stage",
+    "pipeline_error",
     "applied_policy",
     "created_at",
+    "updated_at",
 }
 
 JSON_COLUMNS = {"bbox", "center", "llm_report", "llm_summary", "applied_policy"}
@@ -209,7 +222,7 @@ def update_report(conn: psycopg2.extensions.connection, report_id: int, data: Di
         return
 
     columns = list(payload.keys())
-    set_clause = ", ".join([f"{col} = %s" for col in columns])
+    set_clause = ", ".join([f"{col} = %s" for col in columns] + ["updated_at = CURRENT_TIMESTAMP"])
     sql = f"UPDATE inspection_reports SET {set_clause} WHERE id = %s"
 
     with conn.cursor() as cur:
@@ -282,6 +295,9 @@ def get_filtered_reports(
             llm_report,
             llm_summary,
             llm_inference_duration,
+            pipeline_status,
+            pipeline_stage,
+            pipeline_error,
             applied_policy,
             created_at
         """

@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +44,7 @@ INCOMING_DEFAULT_DATASET = os.getenv("INCOMING_DEFAULT_DATASET", "incoming")
 INCOMING_DEFAULT_CATEGORY = os.getenv("INCOMING_DEFAULT_CATEGORY", "")
 INCOMING_DEFAULT_LINE = os.getenv("INCOMING_DEFAULT_LINE", "LINE-A-01")
 INCOMING_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+PIPELINE_WORKERS = max(1, int(os.getenv("PIPELINE_WORKERS", "2")))
 
 LINE_PATTERN = re.compile(r"(?i)line[_-]?([a-z0-9]+)")
 
@@ -55,6 +57,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 INCOMING_WATCH_ENABLED = _env_bool("INCOMING_WATCH_ENABLED", True)
+RAG_ENABLED = _env_bool("RAG_ENABLED", True)
 
 
 class LlmModelUpdateRequest(BaseModel):
@@ -297,6 +300,144 @@ def _decide_with_policy(
             "used_calibration": bool(calibration),
         },
     }
+
+
+def _to_bool_like(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    if s in {"true", "1", "yes", "y", "anomaly", "ng", "defect", "bad"}:
+        return True
+    if s in {"false", "0", "no", "n", "normal", "ok", "good"}:
+        return False
+    return None
+
+
+def _final_decision_from_llm(llm_response: dict[str, Any]) -> str:
+    llm_flag = _to_bool_like(llm_response.get("is_anomaly_llm"))
+    if llm_flag is True:
+        return "anomaly"
+    if llm_flag is False:
+        return "normal"
+    return "review_needed"
+
+
+def _has_llm_content(llm_response: dict[str, Any]) -> bool:
+    summary = llm_response.get("llm_summary")
+    report = llm_response.get("llm_report")
+    if isinstance(summary, dict) and summary:
+        return True
+    if isinstance(summary, str) and summary.strip():
+        return True
+    if isinstance(report, dict):
+        for key in ("summary", "description", "possible_cause", "recommendation", "raw_response"):
+            value = report.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+        return bool(report)
+    return False
+
+
+def _finalize_rag_llm_pipeline(
+    app: FastAPI,
+    *,
+    report_id: int,
+    model_category: str,
+    ad_result: dict[str, Any],
+    ad_decision: str,
+    policy: dict[str, Any],
+) -> None:
+    conn = pg.connect_fast(DATABASE_URL)
+    ref_path: str | None = None
+    try:
+        if RAG_ENABLED:
+            pg.update_report(conn, report_id, {"pipeline_status": "processing", "pipeline_stage": "rag_running"})
+
+            try:
+                rag_results = app.state.rag_service.search_closest_normal(ad_result["original_path"], model_category)
+                ref_path = rag_results[0]["path"] if rag_results else None
+                pg.update_report(
+                    conn,
+                    report_id,
+                    {
+                        "similar_image_path": ref_path,
+                        "pipeline_status": "processing",
+                        "pipeline_stage": "rag_done",
+                    },
+                )
+            except Exception as exc:
+                logger.exception("RAG stage failed for report_id=%s", report_id)
+                pg.update_report(
+                    conn,
+                    report_id,
+                    {
+                        "pipeline_status": "processing",
+                        "pipeline_stage": "rag_failed",
+                        "pipeline_error": f"RAG: {str(exc)[:500]}",
+                    },
+                )
+        else:
+            pg.update_report(conn, report_id, {"pipeline_status": "processing", "pipeline_stage": "rag_skipped"})
+
+        pg.update_report(conn, report_id, {"pipeline_status": "processing", "pipeline_stage": "llm_running"})
+        llm_started = datetime.now()
+        with app.state.llm_lock:
+            llm_response = app.state.llm_service.generate_dynamic_report(
+                ad_result["original_path"],
+                ref_path,
+                model_category,
+                {**ad_result, "ad_decision": ad_decision},
+                policy,
+            )
+
+        if not _has_llm_content(llm_response):
+            pg.update_report(
+                conn,
+                report_id,
+                {
+                    **llm_response,
+                    "ad_decision": "review_needed",
+                    "pipeline_status": "failed",
+                    "pipeline_stage": "llm_empty",
+                    "pipeline_error": "LLM returned empty/invalid content",
+                },
+            )
+            return
+
+        llm_decision = _final_decision_from_llm(llm_response)
+        pg.update_report(
+            conn,
+            report_id,
+            {
+                **llm_response,
+                "ad_decision": llm_decision,
+                "llm_start_time": llm_started,
+                "pipeline_status": "completed",
+                "pipeline_stage": "llm_done",
+                "pipeline_error": None,
+            },
+        )
+    except Exception as exc:
+        logger.exception("LLM stage failed for report_id=%s", report_id)
+        try:
+            pg.update_report(
+                conn,
+                report_id,
+                {
+                    "ad_decision": "review_needed",
+                    "pipeline_status": "failed",
+                    "pipeline_stage": "llm_failed",
+                    "pipeline_error": f"LLM: {str(exc)[:500]}",
+                },
+            )
+        except Exception:
+            logger.exception("Failed to mark pipeline failure for report_id=%s", report_id)
+    finally:
+        conn.close()
 
 
 def _set_llm_model(app: FastAPI, model_name: str) -> None:
@@ -546,7 +687,8 @@ def _run_inspection_pipeline(
         "category": model_category,
         "line": line,
         "ad_score": score,
-        "ad_decision": ad_decision,
+        # 최종 판정 기준은 LLM이다. LLM 완료 전에는 review_needed로 유지한다.
+        "ad_decision": "review_needed",
         "is_anomaly_ad": ad_decision == "anomaly",
         "has_defect": ad_result.get("has_defect", False),
         "region": ad_result.get("region"),
@@ -561,40 +703,42 @@ def _run_inspection_pipeline(
         "overlay_path": ad_result["overlay_path"],
         "created_at": ad_start_time,
         "ad_inference_duration": (datetime.now() - ad_start_time).total_seconds(),
+        "pipeline_status": "processing",
+        "pipeline_stage": "ad_done",
         "applied_policy": applied_policy,
     }
     report_id = pg.insert_report(conn, initial_data)
 
-    warnings: list[str] = []
-    ref_path = None
     try:
-        rag_results = app.state.rag_service.search_closest_normal(ad_result["original_path"], model_category)
-        ref_path = rag_results[0]["path"] if rag_results else None
-        pg.update_report(conn, report_id, {"similar_image_path": ref_path})
-    except Exception:
-        logger.exception("RAG stage failed for report_id=%s", report_id)
-        warnings.append("rag_failed")
-
-    try:
-        llm_response = app.state.llm_service.generate_dynamic_report(
-            ad_result["original_path"],
-            ref_path,
-            model_category,
-            {**ad_result, "ad_decision": ad_decision},
-            policy,
+        app.state.pipeline_executor.submit(
+            _finalize_rag_llm_pipeline,
+            app,
+            report_id=report_id,
+            model_category=model_category,
+            ad_result=ad_result,
+            ad_decision=ad_decision,
+            policy=policy,
         )
-        pg.update_report(conn, report_id, llm_response)
-    except Exception:
-        logger.exception("LLM stage failed for report_id=%s", report_id)
-        warnings.append("llm_failed")
+    except Exception as exc:
+        logger.exception("Failed to enqueue RAG/LLM pipeline for report_id=%s", report_id)
+        pg.update_report(
+            conn,
+            report_id,
+            {
+                "pipeline_status": "failed",
+                "pipeline_stage": "enqueue_failed",
+                "pipeline_error": f"QUEUE: {str(exc)[:500]}",
+            },
+        )
 
     return {
-        "status": "success",
+        "status": "accepted",
         "report_id": report_id,
-        "ad_decision": ad_decision,
+        "ad_decision": "review_needed",
         "category": model_category,
         "source_image": ingest_source_path,
-        "warnings": warnings,
+        "pipeline_status": "processing",
+        "pipeline_stage": "ad_done",
     }
 
 
@@ -726,6 +870,8 @@ async def lifespan(app: FastAPI):
     app.state.rag_service = RagService(index_dir=str(RAG_INDEX_DIR))
     _set_llm_model(app, MODEL_NAME)
     app.state.inspect_lock = threading.Lock()
+    app.state.llm_lock = threading.Lock()
+    app.state.pipeline_executor = ThreadPoolExecutor(max_workers=PIPELINE_WORKERS)
     app.state.incoming_unresolved = set()
 
     incoming_task: asyncio.Task | None = None
@@ -742,6 +888,10 @@ async def lifespan(app: FastAPI):
                 await incoming_task
             except asyncio.CancelledError:
                 pass
+        try:
+            app.state.pipeline_executor.shutdown(wait=False, cancel_futures=False)
+        except Exception:
+            logger.exception("Failed to shutdown pipeline executor")
 
 
 app = FastAPI(title="Industrial AI Inspection System", lifespan=lifespan)
@@ -791,6 +941,8 @@ async def get_incoming_status():
         "root": str(INCOMING_ROOT),
         "scan_interval_sec": INCOMING_SCAN_INTERVAL_SEC,
         "stable_seconds": INCOMING_STABLE_SECONDS,
+        "pipeline_workers": PIPELINE_WORKERS,
+        "rag_enabled": RAG_ENABLED,
         "default_dataset": INCOMING_DEFAULT_DATASET,
         "default_category": INCOMING_DEFAULT_CATEGORY,
         "default_line": INCOMING_DEFAULT_LINE,
@@ -804,7 +956,7 @@ async def run_inspection(
     dataset: str = Form("default"),
     line: str = Form("line_1"),
 ):
-    """Run AD -> RAG -> LLM and persist report fields used by current frontend."""
+    """Run AD immediately and enqueue RAG/LLM stages for asynchronous completion."""
     try:
         file.file.seek(0)
         return await run_in_threadpool(

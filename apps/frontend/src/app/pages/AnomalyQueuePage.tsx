@@ -79,17 +79,32 @@ export function AnomalyQueuePage({ cases, onCaseClick }: AnomalyQueuePageProps) 
                 <td className="px-6 py-4 text-gray-500">{locationLabel(c.location)}</td>
 
                 <td className="px-6 py-4">
-                  <span
-                    className={`px-2 py-1 rounded-full text-xs font-medium ${
-                      c.decision === "NG"
-                        ? "bg-red-100 text-red-700"
-                        : c.decision === "REVIEW"
-                          ? "bg-orange-100 text-orange-700"
-                          : "bg-green-100 text-green-700"
-                    }`}
-                  >
-                    {c.decision}
-                  </span>
+                  {c.pipeline_status === "processing" ? (
+                    <div className="flex flex-col gap-1">
+                      <span className="px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700 w-fit">
+                        PROCESSING
+                      </span>
+                      <span className="text-[11px] text-blue-600">{c.pipeline_stage || "llm_running"}</span>
+                    </div>
+                  ) : c.pipeline_status === "failed" ? (
+                    <div className="flex flex-col gap-1">
+                      <span className="px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-700 w-fit">
+                        LLM FAILED
+                      </span>
+                    </div>
+                  ) : (
+                    <span
+                      className={`px-2 py-1 rounded-full text-xs font-medium ${
+                        c.decision === "NG"
+                          ? "bg-red-100 text-red-700"
+                          : c.decision === "REVIEW"
+                            ? "bg-orange-100 text-orange-700"
+                            : "bg-green-100 text-green-700"
+                      }`}
+                    >
+                      {c.decision}
+                    </span>
+                  )}
                 </td>
               
                 <td className="px-6 py-4 text-right">

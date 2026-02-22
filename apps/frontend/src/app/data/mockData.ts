@@ -31,6 +31,9 @@ export interface AnomalyCase {
   
   llm_summary: string;
   llm_structured_json: any;
+  pipeline_status?: "processing" | "completed" | "failed" | string;
+  pipeline_stage?: string;
+  pipeline_error?: string;
   operator_note?: string;
   action_log: ActionLog[];
   image_path?: string;

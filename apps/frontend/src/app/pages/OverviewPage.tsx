@@ -10,6 +10,7 @@ import {
   FileText,
   Search,
   TrendingUp,
+  Clock,
 } from "lucide-react";
 import {
   BarChart,
@@ -83,6 +84,10 @@ export function OverviewPage({ cases, alerts, activeModel }: OverviewPageProps) 
 
   const defectRate = agg.total ? ((agg.ng / agg.total) * 100).toFixed(1) : "0.0";
   const reviewRate = agg.total ? ((agg.review / agg.total) * 100).toFixed(1) : "0.0";
+  const processingCount = useMemo(
+    () => cases.filter((c) => c.pipeline_status === "processing").length,
+    [cases]
+  );
   const hourlyTrend = useMemo(() => toHourlyDecisionTrend(agg), [agg]);
 
   const getAlertIcon = (type: Alert["type"]) => {
@@ -111,6 +116,7 @@ export function OverviewPage({ cases, alerts, activeModel }: OverviewPageProps) 
         <KPICard title="검사 수" value={agg.total.toLocaleString()} subtext="오늘 누적 검사량" icon={Activity} />
         <KPICard title="불량률" value={`${defectRate}%`} subtext="오늘 검사 대비 불량" icon={AlertTriangle} />
         <KPICard title="재검률" value={`${reviewRate}%`} subtext="AI 판정 보류 건" icon={CheckCircle} />
+        <KPICard title="AI 분석 진행중" value={processingCount.toString()} subtext="LLM 처리 대기/진행 건" icon={Clock} />
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
