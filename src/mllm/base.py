@@ -46,63 +46,113 @@ Finally, you should output a list of answer, such as:
 
 # ── Report generation prompts ──────────────────────────────────────────
 
-REPORT_PROMPT = '''You are an expert industrial quality inspector.
-Look at this product image carefully and determine if there are any defects or anomalies.
-Pay close attention to: surface damage, deformation, missing parts, wrong positioning,
-opened packaging, contamination, cracks, scratches, or any other abnormality.
+REPORT_PROMPT = '''당신은 제조 품질관리 수석 검사관입니다.
+목표는 단일 제품 이미지로 고품질 검사 리포트를 작성하는 것입니다.
 
-Product category: {category}
+제품 카테고리: {category}
 
-If the product looks perfect and normal, set "is_anomaly" to false.
-If there is ANY abnormality, set "is_anomaly" to true.
+판정 우선순위:
+1) 이미지에서 확인되는 시각적 근거(최우선)
+2) 일반 결함 지식
+3) 기타 단서
 
-Respond in JSON format ONLY:
+품질 규칙:
+- 눈으로 확인 가능한 구체적 결함 근거가 있을 때만 "is_anomaly"를 true로 설정하세요.
+- 근거가 약하거나 모호하면 "is_anomaly"를 false로 두고 confidence를 낮게 설정하세요.
+- 이미지에 보이지 않는 결함/원인/위치를 추측해 만들어내지 마세요.
+
+출력 언어/형식 규칙:
+- JSON만 출력하세요(마크다운, 코드블록, 설명 문장 금지).
+- JSON key 이름은 아래 스키마와 정확히 동일하게 유지하세요.
+- 모든 문자열 value는 한국어로 작성하세요.
+- 단 "severity"와 "risk_level" 값은 low, medium, high, none 중 하나만 사용하세요.
+- "confidence"는 0.00~1.00 범위의 숫자로 작성하세요.
+
+필드 일관성 규칙:
+- "is_anomaly"가 false인 경우:
+  anomaly_type="none", severity="none", location="none", possible_cause="none", risk_level="none"으로 맞추세요.
+  description에는 정상 판정의 시각적 근거를 작성하세요.
+- "is_anomaly"가 true인 경우:
+  anomaly_type은 구체적이어야 하며("none" 금지), severity/risk_level은 "none"이 아니어야 합니다.
+  description에는 최소 2개의 구체적 시각 근거(무엇이, 어디에)를 포함하세요.
+
+다음 결함 taxonomy를 참고해 가장 가까운 레이블을 선택하세요:
+scratch, crack, dent, deformation, contamination, foreign_material, seal_defect,
+label_defect, print_defect, missing_part, misalignment, color_stain, other, none
+
+반드시 아래 JSON 형식으로만 출력하세요:
 {{
   "is_anomaly": true or false,
   "report": {{
-    "anomaly_type": "type of defect or none",
+    "anomaly_type": "specific defect type or none",
     "severity": "low/medium/high/none",
-    "location": "where the defect is or none",
-    "description": "detailed defect description or normal product",
-    "possible_cause": "most likely root cause of the defect or none",
+    "location": "defect location or none",
+    "description": "근거 중심의 상세 설명(한국어)",
+    "possible_cause": "가장 가능성 높은 원인 또는 none",
     "confidence": 0.0 to 1.0,
-    "recommendation": "specific corrective/preventive actions"
+    "recommendation": "구체적 시정/예방 조치(한국어)"
   }},
   "summary": {{
-    "summary": "2-3 concise sentences including judgement, key evidence, and urgency",
+    "summary": "정확히 2문장: 최종 판정 + 핵심 근거/긴급도(한국어)",
     "risk_level": "low/medium/high/none"
   }}
 }}'''
 
-REPORT_PROMPT_WITH_AD = '''You are an expert industrial quality inspector.
-Look at this product image carefully and determine if there are any defects or anomalies.
-Pay close attention to: surface damage, deformation, missing parts, wrong positioning,
-opened packaging, contamination, cracks, scratches, or any other abnormality.
+REPORT_PROMPT_WITH_AD = '''당신은 제조 품질관리 수석 검사관입니다.
+목표는 단일 제품 이미지로 고품질 검사 리포트를 작성하는 것입니다.
 
-Product category: {category}
+제품 카테고리: {category}
 
-An anomaly detection model has pre-analyzed this image:
+다음은 이상탐지(AD) 모델의 사전 분석 결과입니다:
 {ad_info}
 
-Consider this as a reference, but rely primarily on your own visual analysis. The model can make mistakes.
+판정 우선순위:
+1) 이미지에서 확인되는 시각적 근거(최우선)
+2) AD 결과(보조 근거)
+3) 일반 결함 지식
 
-If the product looks perfect and normal, set "is_anomaly" to false.
-If there is ANY abnormality, set "is_anomaly" to true.
+충돌 처리 규칙:
+- AD 결과와 시각 근거가 충돌하면 시각 근거를 우선하세요.
+- 중요한 충돌인 경우 description에 그 사실을 한국어로 간단히 명시하세요.
 
-Respond in JSON format ONLY:
+품질 규칙:
+- 눈으로 확인 가능한 구체적 결함 근거가 있을 때만 "is_anomaly"를 true로 설정하세요.
+- 근거가 약하거나 모호하면 "is_anomaly"를 false로 두고 confidence를 낮게 설정하세요.
+- 이미지에 보이지 않는 결함/원인/위치를 추측해 만들어내지 마세요.
+
+출력 언어/형식 규칙:
+- JSON만 출력하세요(마크다운, 코드블록, 설명 문장 금지).
+- JSON key 이름은 아래 스키마와 정확히 동일하게 유지하세요.
+- 모든 문자열 value는 한국어로 작성하세요.
+- 단 "severity"와 "risk_level" 값은 low, medium, high, none 중 하나만 사용하세요.
+- "confidence"는 0.00~1.00 범위의 숫자로 작성하세요.
+
+필드 일관성 규칙:
+- "is_anomaly"가 false인 경우:
+  anomaly_type="none", severity="none", location="none", possible_cause="none", risk_level="none"으로 맞추세요.
+  description에는 정상 판정의 시각적 근거를 작성하세요.
+- "is_anomaly"가 true인 경우:
+  anomaly_type은 구체적이어야 하며("none" 금지), severity/risk_level은 "none"이 아니어야 합니다.
+  description에는 최소 2개의 구체적 시각 근거(무엇이, 어디에)를 포함하세요.
+
+다음 결함 taxonomy를 참고해 가장 가까운 레이블을 선택하세요:
+scratch, crack, dent, deformation, contamination, foreign_material, seal_defect,
+label_defect, print_defect, missing_part, misalignment, color_stain, other, none
+
+반드시 아래 JSON 형식으로만 출력하세요:
 {{
   "is_anomaly": true or false,
   "report": {{
-    "anomaly_type": "type of defect or none",
+    "anomaly_type": "specific defect type or none",
     "severity": "low/medium/high/none",
-    "location": "where the defect is or none",
-    "description": "detailed defect description or normal product",
-    "possible_cause": "most likely root cause of the defect or none",
+    "location": "defect location or none",
+    "description": "근거 중심의 상세 설명(한국어)",
+    "possible_cause": "가장 가능성 높은 원인 또는 none",
     "confidence": 0.0 to 1.0,
-    "recommendation": "specific corrective/preventive actions"
+    "recommendation": "구체적 시정/예방 조치(한국어)"
   }},
   "summary": {{
-    "summary": "2-3 concise sentences including judgement, key evidence, and urgency",
+    "summary": "정확히 2문장: 최종 판정 + 핵심 근거/긴급도(한국어)",
     "risk_level": "low/medium/high/none"
   }}
 }}'''
@@ -454,6 +504,7 @@ class BaseLLMClient(ABC):
         category: str,
         ad_info: Optional[Dict] = None,
         few_shot_paths: Optional[List[str]] = None,
+        instruction: Optional[str] = None,
     ) -> dict:
         """Build payload for report generation.
 
@@ -461,7 +512,9 @@ class BaseLLMClient(ABC):
         Default implementation uses build_payload with an empty questions list
         and the report prompt as a single text question.
         """
-        if ad_info:
+        if instruction:
+            prompt_text = instruction
+        elif ad_info:
             prompt_text = REPORT_PROMPT_WITH_AD.format(
                 category=category,
                 ad_info=format_ad_info(ad_info),
@@ -494,6 +547,7 @@ class BaseLLMClient(ABC):
             category,
             ad_info,
             few_shot_paths=kwargs.get("few_shot_paths"),
+            instruction=kwargs.get("instruction"),
         )
 
         t0 = time.time()

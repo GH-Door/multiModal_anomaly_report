@@ -34,8 +34,9 @@ def _resolve_few_shot_path(ref_path: str) -> str | None:
 class LlmService:
     """LLM report adapter returning DB-compatible keys."""
 
-    def __init__(self, client) -> None:
+    def __init__(self, client, domain_rag_service=None) -> None:
         self.client = client
+        self.domain_rag_service = domain_rag_service
 
     def generate_dynamic_report(
         self,
@@ -63,11 +64,23 @@ class LlmService:
                 "area_ratio": ad_data.get("area_ratio"),
             },
         }
+
+        report_instruction: str | None = None
+        if self.domain_rag_service is not None:
+            try:
+                report_instruction = self.domain_rag_service.build_report_instruction(
+                    model_category=category,
+                    ad_data=ad_data,
+                )
+            except Exception:
+                logger.exception("Domain knowledge RAG prompt build failed for category=%s", category)
+
         result = self.client.generate_report(
             image_path=image_path,
             category=category,
             ad_info=ad_info,
             few_shot_paths=few_shot_paths,
+            instruction=report_instruction,
         )
         return {
             "is_anomaly_llm": result.get("is_anomaly_LLM"),

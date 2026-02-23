@@ -21,6 +21,7 @@ from pydantic import BaseModel
 import src.storage.pg as pg
 from src.mllm.factory import get_llm_client, list_llm_models
 from src.service.ad_service import AdService
+from src.service.domain_rag_service import DomainKnowledgeRagService
 from src.service.llm_service import LlmService
 from src.service.visual_rag_service import RagService
 
@@ -31,11 +32,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.getenv("DATABASE_URL", os.getenv("PG_DSN", "postgresql://son:1234@localhost/inspection"))
 MODEL_NAME = os.getenv("LLM_MODEL", "internvl")
 CHECKPOINT_DIR = Path(os.getenv("AD_CHECKPOINT_DIR", str(PROJECT_ROOT / "checkpoints")))
-RAG_INDEX_DIR = Path(os.getenv("RAG_INDEX_DIR", str(PROJECT_ROOT / "rag_index")))
+RAG_INDEX_DIR = Path(os.getenv("RAG_INDEX_DIR", str(PROJECT_ROOT / "rag")))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(PROJECT_ROOT / "outputs")))
 DATA_DIR = Path(os.getenv("DATA_DIR", str(PROJECT_ROOT / "datasets")))
 AD_POLICY_PATH = Path(os.getenv("AD_POLICY_PATH", str(PROJECT_ROOT / "configs" / "ad_policy.json")))
 AD_CALIBRATION_PATH = Path(os.getenv("AD_CALIBRATION_PATH", str(PROJECT_ROOT / "configs" / "ad_calibration.json")))
+DOMAIN_KNOWLEDGE_JSON_PATH = Path(
+    os.getenv("DOMAIN_KNOWLEDGE_JSON_PATH", str(DATA_DIR / "domain_knowledge.json"))
+)
+DOMAIN_RAG_PERSIST_DIR = Path(
+    os.getenv("DOMAIN_RAG_PERSIST_DIR", str(PROJECT_ROOT / "vectorstore" / "domain_knowledge"))
+)
+DOMAIN_RAG_TOP_K = max(1, int(os.getenv("DOMAIN_RAG_TOP_K", "3")))
 
 INCOMING_ROOT = Path(os.getenv("INCOMING_ROOT", "/home/ubuntu/incoming"))
 INCOMING_SCAN_INTERVAL_SEC = float(os.getenv("INCOMING_SCAN_INTERVAL_SEC", "5"))
@@ -61,6 +69,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 INCOMING_WATCH_ENABLED = _env_bool("INCOMING_WATCH_ENABLED", True)
 RAG_ENABLED = _env_bool("RAG_ENABLED", True)
+DOMAIN_RAG_ENABLED = _env_bool("DOMAIN_RAG_ENABLED", True)
 
 LLM_MODEL_ALIASES = {
     "internv1": "internvl",
@@ -535,7 +544,10 @@ def _set_llm_model(app: FastAPI, model_name: str) -> None:
         logger.info("Normalized LLM model alias: %s -> %s", selected, normalized)
     selected = normalized
     app.state.llm_client = get_llm_client(selected)
-    app.state.llm_service = LlmService(client=app.state.llm_client)
+    app.state.llm_service = LlmService(
+        client=app.state.llm_client,
+        domain_rag_service=getattr(app.state, "domain_rag_service", None),
+    )
     app.state.llm_model = selected
 
 
@@ -992,6 +1004,12 @@ async def lifespan(app: FastAPI):
     app.state.ad_policy_doc = _load_ad_policy_doc(AD_POLICY_PATH)
     app.state.ad_calibration_doc = _load_ad_calibration_doc(AD_CALIBRATION_PATH)
     app.state.rag_service = RagService(index_dir=str(RAG_INDEX_DIR))
+    app.state.domain_rag_service = DomainKnowledgeRagService(
+        json_path=str(DOMAIN_KNOWLEDGE_JSON_PATH),
+        persist_dir=str(DOMAIN_RAG_PERSIST_DIR),
+        enabled=DOMAIN_RAG_ENABLED,
+        top_k=DOMAIN_RAG_TOP_K,
+    )
     _set_llm_model(app, MODEL_NAME)
     app.state.inspect_lock = threading.Lock()
     app.state.llm_lock = threading.Lock()
@@ -1077,6 +1095,10 @@ async def get_incoming_status():
         "pipeline_watchdog_interval_sec": PIPELINE_WATCHDOG_INTERVAL_SEC,
         "pipeline_stale_seconds": PIPELINE_STALE_SECONDS,
         "rag_enabled": RAG_ENABLED,
+        "domain_rag_enabled": DOMAIN_RAG_ENABLED,
+        "domain_rag_json_path": str(DOMAIN_KNOWLEDGE_JSON_PATH),
+        "domain_rag_persist_dir": str(DOMAIN_RAG_PERSIST_DIR),
+        "domain_rag_top_k": DOMAIN_RAG_TOP_K,
         "default_dataset": INCOMING_DEFAULT_DATASET,
         "default_category": INCOMING_DEFAULT_CATEGORY,
         "default_line": INCOMING_DEFAULT_LINE,

@@ -339,9 +339,12 @@ class InternVLClient(BaseLLMClient):
         category: str,
         ad_info: Optional[Dict] = None,
         few_shot_paths: Optional[List[str]] = None,
+        instruction: Optional[str] = None,
     ) -> dict:
         refs = few_shot_paths or []
-        if ad_info:
+        if instruction:
+            prompt = instruction.strip()
+        elif ad_info:
             prompt = REPORT_PROMPT_WITH_AD.format(category=category, ad_info=format_ad_info(ad_info)).strip()
         else:
             prompt = REPORT_PROMPT.format(category=category).strip()
