@@ -382,6 +382,7 @@ class BaseLLMClient(ABC):
         questions: List[Dict[str, str]],
         ad_info: Optional[Dict] = None,
         instruction: Optional[str] = None,
+        report_mode: bool = False,
     ) -> dict:
         """Build API payload. Must be implemented by subclass.
 
@@ -391,6 +392,7 @@ class BaseLLMClient(ABC):
             questions: List of question dictionaries
             ad_info: Optional anomaly detection model output dictionary
             instruction: Optional custom instruction (e.g. RAG prompt) to override default
+            report_mode: If True, build payload for report generation (no MCQ phrasing)
         """
         pass
 
@@ -522,8 +524,14 @@ class BaseLLMClient(ABC):
         else:
             prompt_text = REPORT_PROMPT.format(category=category)
 
-        questions = [{"type": "text", "text": prompt_text}]
-        return self.build_payload(image_path, few_shot_paths or [], questions, instruction="")
+        return self.build_payload(
+            image_path,
+            few_shot_paths or [],
+            [],
+            ad_info=ad_info,
+            instruction=prompt_text,
+            report_mode=True,
+        )
 
     def generate_report(
         self,

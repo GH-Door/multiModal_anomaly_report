@@ -47,12 +47,16 @@ REPORT_PROMPT_RAG = '''당신은 제조 품질관리 수석 검사관입니다.
 
 제품 카테고리: {category}
 
+다음은 이상탐지(AD) 모델의 사전 분석 결과입니다:
+{ad_info}
+
 다음은 이 제품의 알려진 결함 패턴에 대한 도메인 지식입니다:
 {domain_knowledge}
 
 판정 우선순위:
 1) 이미지에서 확인되는 시각적 근거(최우선)
-2) 도메인 지식(보조 근거)
+2) AD 결과(보조 근거)
+3) 도메인 지식(보조 근거)
 
 RAG 사용 규칙:
 - 도메인 지식은 결함명 정교화와 원인 추정 보조에 활용하세요.
@@ -105,18 +109,21 @@ label_defect, print_defect, missing_part, misalignment, color_stain, other, none
 def report_prompt_rag(
     category: str,
     domain_knowledge: str = "",
+    ad_info: str = "",
 ) -> str:
     """Build a RAG-augmented report generation prompt.
 
     Args:
         category: Product category string.
         domain_knowledge: Formatted domain knowledge from retriever.format_context().
+        ad_info: Formatted AD model output string.
 
     Returns:
         Filled report prompt string.
     """
     return REPORT_PROMPT_RAG.format(
         category=category,
+        ad_info=ad_info or "No anomaly detection information available.",
         domain_knowledge=domain_knowledge or "No relevant domain knowledge found.",
     )
 

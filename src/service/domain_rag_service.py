@@ -100,7 +100,13 @@ class DomainKnowledgeRagService:
         suffix = f" {' '.join(extra)}" if extra else ""
         return f"{category} defect anomaly inspection{suffix}"
 
-    def build_report_instruction(self, *, model_category: str, ad_data: dict[str, Any] | None = None) -> str | None:
+    def build_report_instruction(
+        self,
+        *,
+        model_category: str,
+        ad_data: dict[str, Any] | None = None,
+        ad_info_text: str = "",
+    ) -> str | None:
         """Return report prompt with retrieved domain knowledge, or None when unavailable."""
         if not self.ready:
             return None
@@ -134,7 +140,11 @@ class DomainKnowledgeRagService:
                 dataset or "*",
                 category,
             )
-            return self._report_prompt_rag(category=category, domain_knowledge=context)  # type: ignore[misc]
+            return self._report_prompt_rag(  # type: ignore[misc]
+                category=category,
+                domain_knowledge=context,
+                ad_info=ad_info_text,
+            )
         except Exception:
             logger.exception("Domain knowledge retrieval failed | model_category=%s", model_category)
             return None

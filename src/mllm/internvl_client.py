@@ -380,6 +380,7 @@ class InternVLClient(BaseLLMClient):
         questions: List[Dict[str, str]],
         ad_info: Optional[Dict] = None,
         instruction: Optional[str] = None,
+        report_mode: bool = False,
     ) -> dict:
         """Build InternVL message format."""
         # Select instruction: custom > AD > default
@@ -398,10 +399,13 @@ class InternVLClient(BaseLLMClient):
                 prompt += "\n<image>\n"
 
         prompt += "Following is the query image:\n<image>\n"
-        prompt += "Following is the question list. Answer with the option's letter from the given choices directly:\n"
-
-        for q in questions:
-            prompt += f"{q['text']}\n"
+        if report_mode:
+            for q in questions:
+                prompt += f"{q['text']}\n"
+        else:
+            prompt += "Following is the question list. Answer with the option's letter from the given choices directly:\n"
+            for q in questions:
+                prompt += f"{q['text']}\n"
 
         return {
             "prompt": prompt,
