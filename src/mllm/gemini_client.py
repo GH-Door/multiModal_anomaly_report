@@ -1,6 +1,7 @@
 """Google Gemini client for MMAD evaluation."""
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import Dict, List, Optional, Tuple
@@ -8,6 +9,8 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 
 from .base import BaseLLMClient, INSTRUCTION, INSTRUCTION_WITH_AD, format_ad_info, get_mime_type
+
+logger = logging.getLogger(__name__)
 
 
 class GeminiClient(BaseLLMClient):
@@ -73,9 +76,21 @@ class GeminiClient(BaseLLMClient):
 
             except Exception as e:
                 retries += 1
+                logger.warning(
+                    "Gemini request failed (model=%s, attempt=%d/%d): %s",
+                    self.model_name,
+                    retries,
+                    self.max_retries,
+                    str(e),
+                )
                 if retries < self.max_retries:
                     time.sleep(retry_delay)
                     retry_delay *= 2
+        logger.error(
+            "Gemini request exhausted retries (model=%s, max_retries=%d)",
+            self.model_name,
+            self.max_retries,
+        )
         return None
 
     def build_payload(
@@ -85,6 +100,7 @@ class GeminiClient(BaseLLMClient):
         questions: List[Dict[str, str]],
         ad_info: Optional[Dict] = None,
         instruction: Optional[str] = None,
+        report_mode: bool = False,
     ) -> dict:
         """Build Gemini API payload following paper's format."""
 
@@ -135,15 +151,22 @@ class GeminiClient(BaseLLMClient):
                 instruction = INSTRUCTION
 
         # Add text prompt
-        parts.append({
-            "text": (
+        if report_mode:
+            prompt_text = instruction + "\n"
+            if incontext:
+                prompt_text += incontext + "\n"
+            prompt_text += "The last image is the query image.\n"
+            if conversation_text.strip():
+                prompt_text += conversation_text
+        else:
+            prompt_text = (
                 instruction +
                 incontext +
                 "The last image is the query image. " +
                 "Following is the question list: \n" +
                 conversation_text
             )
-        })
+        parts.append({"text": prompt_text})
 
         return {"parts": parts}
 

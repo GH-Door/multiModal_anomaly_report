@@ -18,6 +18,7 @@ export function defectTypeLabel(type?: string) {
     crack: "파손/균열",
     missing_component: "구성요소 누락",
     scratch: "스크래치",
+    other: "기타",
   };
   if (map[t]) return map[t];
   if (!t) return "-";

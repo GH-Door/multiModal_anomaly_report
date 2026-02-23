@@ -19,11 +19,11 @@ function normalizeUrl(path?: string | null): string | null {
   if (p.startsWith("http://") || p.startsWith("https://")) return p;
 
   // FastAPI static mounts
-  if (p.startsWith("/outputs/") || p.startsWith("/data/datasets/")) {
+  if (p.startsWith("/outputs/") || p.startsWith("/home/ubuntu/dataset/")) {
     return `${API_BASE}${p}`;
   }
 
-  if (p.startsWith("outputs/") || p.startsWith("data/datasets/")) {
+  if (p.startsWith("outputs/") || p.startsWith("home/ubuntu/dataset/")) {
     return `${API_BASE}/${p}`;
   }
 

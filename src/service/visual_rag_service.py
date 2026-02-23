@@ -20,7 +20,8 @@ class RagService:
             filename = Path(raw_path).name if raw_path else ""
             normalized.append(
                 {
-                    "path": f"/data/datasets/{category}/train/good/{filename}" if filename else "",
+                    # Public URL path served by FastAPI static mount.
+                    "path": f"/home/ubuntu/dataset/{category}/train/good/{filename}" if filename else "",
                     "score": float(item.get("score", 0.0)),
                 }
             )

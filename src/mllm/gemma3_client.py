@@ -98,6 +98,7 @@ class Gemma3Client(BaseLLMClient):
         questions: List[Dict[str, str]],
         ad_info: Optional[Dict] = None,
         instruction: Optional[str] = None,
+        report_mode: bool = False,
     ) -> dict:
         """Build Gemma3 message format (PIL images inline)."""
         if instruction is None:
@@ -118,12 +119,20 @@ class Gemma3Client(BaseLLMClient):
             for ref_path in few_shot_paths:
                 content.append({"type": "image", "image": self.load_image(ref_path)})
 
-        content.append({"type": "text", "text": "Following is the query image:"})
+        if report_mode:
+            content.append({"type": "text", "text": "Following is the query image for inspection report generation:"})
+        else:
+            content.append({"type": "text", "text": "Following is the query image:"})
         content.append({"type": "image", "image": self.load_image(query_image_path)})
 
-        content.append({"type": "text", "text": "Following is the question list:"})
-        for q in questions:
-            content.append({"type": "text", "text": q["text"]})
+        if report_mode:
+            for q in questions:
+                if q.get("text"):
+                    content.append({"type": "text", "text": q["text"]})
+        else:
+            content.append({"type": "text", "text": "Following is the question list:"})
+            for q in questions:
+                content.append({"type": "text", "text": q["text"]})
 
         return {"content": content}
 

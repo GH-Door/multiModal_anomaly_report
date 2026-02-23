@@ -1,5 +1,4 @@
-// src/app/pages/CaseDetailPage.tsx
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useRef } from "react";
 import { Badge } from "../components/Badge";
 import {
   ChevronRight,
@@ -9,9 +8,34 @@ import {
   Clock,
   Loader2
 } from "lucide-react";
-import type { AnomalyCase } from "../data/mockData";
 import { decisionLabel, defectTypeLabel, locationLabel } from "../utils/labels";
 import { getCaseImageUrl, type ImageVariant } from "../services/media";
+import jsPDF from "jspdf";
+import html2canvas from "html2canvas";
+import { ReportTemplate, type DBReport } from "../components/ReportTemplate";
+
+// 데이터 타입 정의
+interface AnomalyCase {
+  id: string | number;
+  image_id?: string;
+  timestamp: string | Date;
+  line_id?: string;
+  product_group?: string;
+  defect_type: string;
+  location: string;
+  affected_area_pct?: number;
+  anomaly_score?: number;
+  defect_confidence?: number;
+  decision: "ok" | "ng" | "pending" | "anomaly" | "normal";
+  llm_summary?: string;
+  llm_structured_json?: any;
+  pipeline_status?: string;
+  pipeline_stage?: string;
+  pipeline_error?: string;
+  image_path?: string;
+  heatmap_path?: string;
+  overlay_path?: string;
+}
 
 interface CaseDetailPageProps {
   caseData: AnomalyCase;
@@ -19,23 +43,32 @@ interface CaseDetailPageProps {
   onBackToOverview: () => void;
 }
 
+// PDF 출력을 위한 판정 값 정규화
+function normalizeDecisionForPdf(decision?: string): DBReport["decision"] {
+  const d = String(decision ?? "").trim().toLowerCase();
+  if (d === "ng" || d === "anomaly") return "ng";
+  if (d === "ok" || d === "normal") return "ok";
+  return "pending";
+}
+
+// 이미지 표시 컴포넌트
 function ImagePanel({ caseData, active }: { caseData: AnomalyCase; active: ImageVariant }) {
-  const url = useMemo(() => getCaseImageUrl(caseData, active), [caseData, active]);
+  const url = useMemo(() => getCaseImageUrl(caseData as any, active), [caseData, active]);
 
   return (
-    <div className="bg-gray-100 rounded-lg aspect-[4/3] overflow-hidden mb-4 flex items-center justify-center">
+    <div className="bg-gray-100 rounded-2xl aspect-[4/3] overflow-hidden mb-4 flex items-center justify-center border border-gray-200 shadow-inner">
       {url ? (
         <img
           src={url}
           alt={`${active}`}
           className="w-full h-full object-contain"
+          crossOrigin="anonymous" 
           loading="lazy"
-          decoding="async"
         />
       ) : (
         <div className="text-gray-400 flex flex-col items-center">
-          <Loader2 className="w-6 h-6 animate-spin mb-2" />
-          <p className="text-xs font-medium text-gray-400">이미지 로드 중...</p>
+          <Loader2 className="w-8 h-8 animate-spin mb-3 text-gray-300" />
+          <p className="text-sm font-medium">이미지 데이터를 불러오는 중...</p>
         </div>
       )}
     </div>
@@ -44,34 +77,28 @@ function ImagePanel({ caseData, active }: { caseData: AnomalyCase; active: Image
 
 export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: CaseDetailPageProps) {
   const [activeTab, setActiveTab] = useState<ImageVariant>("original");
-  
-  // 날짜 변환 로직: 백엔드에서 온 문자열을 Date 객체로 안전하게 변환
+  const reportRef = useRef<HTMLDivElement>(null);
+  const [isDownloading, setIsDownloading] = useState(false);
+
+  // 날짜 포맷팅
   const formattedDate = useMemo(() => {
     const d = new Date(caseData.timestamp);
     return isNaN(d.getTime()) ? "N/A" : d.toLocaleString("ko-KR");
   }, [caseData.timestamp]);
 
+  // LLM 데이터 추출 로직
   const llmView = useMemo(() => {
     const source = (caseData.llm_structured_json as any)?.source ?? {};
-
     const asObj = (v: any) => {
       if (!v) return {};
       if (typeof v === "object") return v;
       if (typeof v === "string") {
-        const s = v.trim();
-        if (!s) return {};
-        try {
-          return JSON.parse(s);
-        } catch {
-          return { _text: s };
-        }
+        try { return JSON.parse(v.trim()); } catch { return { _text: v }; }
       }
       return {};
     };
     const pick = (...values: any[]) => {
-      for (const v of values) {
-        if (typeof v === "string" && v.trim()) return v.trim();
-      }
+      for (const v of values) { if (typeof v === "string" && v.trim()) return v.trim(); }
       return "";
     };
 
@@ -79,219 +106,257 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
     const llmReport = asObj(llmReportRoot.report ?? llmReportRoot);
     const llmSummaryObj = asObj(source.llm_summary);
 
-    const summary = pick(
-      caseData.llm_summary,
-      llmSummaryObj.summary,
-      llmSummaryObj._text,
-      llmReport.summary,
-      source.summary
-    );
-    const description = pick(
-      llmReport.description,
-      source.defect_description,
-      source.description
-    );
-    const cause = pick(
-      llmReport.possible_cause,
-      llmReport.cause,
-      llmReport.likely_cause,
-      source.possible_cause
-    );
-    const recommendation = pick(
-      llmReport.recommendation,
-      source.recommendation
-    );
-    const pipelineStatus = String(
-      source.pipeline_status ?? caseData.pipeline_status ?? ""
-    ).toLowerCase();
-    const pipelineStage = String(source.pipeline_stage ?? caseData.pipeline_stage ?? "");
-    const pipelineError = pick(source.pipeline_error, caseData.pipeline_error);
-    return { summary, description, cause, recommendation, pipelineStatus, pipelineStage, pipelineError };
-  }, [caseData.llm_structured_json, caseData.llm_summary]);
+    return {
+      summary: pick(caseData.llm_summary, llmSummaryObj.summary, llmSummaryObj._text, llmReport.summary, source.summary),
+      description: pick(llmReport.description, source.defect_description, source.description),
+      cause: pick(llmReport.possible_cause, llmReport.cause, llmReport.likely_cause, source.possible_cause),
+      recommendation: pick(llmReport.recommendation, source.recommendation)
+    };
+  }, [caseData]);
 
-  const isLlmComplete =
-    llmView.summary.length > 0 ||
-    llmView.description.length > 0 ||
-    llmView.cause.length > 0 ||
-    llmView.recommendation.length > 0;
-  const isLlmProcessing = llmView.pipelineStatus === "processing";
-  const isLlmFailed = llmView.pipelineStatus === "failed";
+  const isLlmComplete = llmView.summary.length > 0;
+
+  // PDF용 데이터 정제 (빈 줄 제거 및 Trim)
+  const cleanSummary = useMemo(() => {
+    const raw = isLlmComplete
+      ? [llmView.summary, llmView.description, llmView.cause, llmView.recommendation]
+          .map(s => s?.trim())
+          .filter(Boolean)
+          .join("\n\n")
+      : "분석 기록 대기 중";
+    
+    return raw.split('\n').map(line => line.trim()).filter(line => line.length > 0).join('\n');
+  }, [llmView, isLlmComplete]);
+
+  // PDF 전달용 데이터 객체
+  const pdfReportData = useMemo<DBReport>(() => ({
+    id: caseData.id,
+    image_id: caseData.image_id ?? "",
+    category: caseData.product_group ?? "-",
+    timestamp: String(caseData.timestamp),
+    defect_type: caseData.defect_type,
+    location: caseData.location,
+    affected_area_pct: caseData.affected_area_pct ?? 0,
+    ad_score: caseData.anomaly_score ?? 0,
+    confidence: caseData.defect_confidence ?? 0,
+    decision: normalizeDecisionForPdf(caseData.decision),
+    llm_analysis_summary: cleanSummary, // 정제된 텍스트 전달
+    image_path: caseData.image_path ?? "",
+    heatmap_path: caseData.heatmap_path ?? "",
+    overlay_path: caseData.overlay_path ?? "",
+  }), [caseData, cleanSummary]);
+
+  // PDF 생성 및 다운로드 함수
+  const handleDownloadPdf = async () => {
+    if (!reportRef.current) return;
+    setIsDownloading(true);
+
+    try {
+      const element = reportRef.current;
+      const imgs = Array.from(element.querySelectorAll("img"));
+      await Promise.all(imgs.map(img => {
+        if (img.complete && img.naturalWidth !== 0) return Promise.resolve();
+        return new Promise(res => { img.onload = res; img.onerror = res; });
+      }));
+
+      const canvas = await html2canvas(element, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: "#ffffff",
+        width: 794,
+        height: element.scrollHeight,
+        windowWidth: 794,
+        onclone: (clonedDoc) => {
+            // oklch 컬러 호환성 해결을 위한 강제 변환
+            const allElements = clonedDoc.getElementsByTagName("*");
+            for (let i = 0; i < allElements.length; i++) {
+                const el = allElements[i] as HTMLElement;
+                const style = window.getComputedStyle(el);
+                if (style.color.includes("oklch")) el.style.color = "#111827";
+                if (style.backgroundColor.includes("oklch")) el.style.backgroundColor = "#ffffff";
+                if (style.borderColor.includes("oklch")) el.style.borderColor = "#e5e7eb";
+            }
+        }
+      });
+
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF("p", "mm", "a4");
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+
+      pdf.addImage(imgData, "PNG", 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`Inspection_Report_${caseData.id}.pdf`);
+    } catch (e) {
+      console.error("PDF 생성 에러:", e);
+      alert("PDF 생성 중 오류가 발생했습니다.");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
 
   return (
-    <div className="p-8 bg-white min-h-screen">
-      {/* 네비게이션 */}
-      <div className="flex items-center gap-2 text-sm text-gray-600 mb-6">
-        <button onClick={onBackToOverview} className="hover:text-gray-900">개요</button>
+    <div className="p-8 bg-gray-50 min-h-screen font-sans">
+      {/* 상단 네비게이션 */}
+      <div className="flex items-center gap-2 text-sm text-gray-500 mb-6">
+        <button onClick={onBackToOverview} className="hover:text-blue-600 transition-colors">개요</button>
         <ChevronRight className="w-4 h-4" />
-        <button onClick={onBackToQueue} className="hover:text-gray-900">이상 큐</button>
+        <button onClick={onBackToQueue} className="hover:text-blue-600 transition-colors">이상 큐</button>
         <ChevronRight className="w-4 h-4" />
-        <span className="text-gray-900 font-medium">Case #{caseData.id}</span>
+        <span className="text-gray-900 font-semibold">{caseData.id}</span>
       </div>
 
-      {/* 상단 헤더 정보 */}
-      <div className="mb-8">
-        <h1 className="text-2xl font-semibold text-gray-900 mb-2">{caseData.id}</h1>
-        <p className="text-sm text-gray-500">
-          {formattedDate} · {caseData.line_id}
-        </p>
+      {/* 헤더 섹션 */}
+      <div className="flex justify-between items-start mb-8">
+        <div>
+          <h1 className="text-3xl font-black text-gray-900 mb-2">{caseData.id}</h1>
+          <div className="flex items-center gap-3 text-sm text-gray-500">
+            <span className="bg-gray-200 px-2 py-0.5 rounded text-gray-700 font-bold">{caseData.line_id || "Line-A"}</span>
+            <span className="flex items-center gap-1"><Clock className="w-3.5 h-3.5" /> {formattedDate}</span>
+          </div>
+        </div>
+        <button
+          onClick={handleDownloadPdf}
+          disabled={isDownloading}
+          className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-all shadow-lg active:scale-95 disabled:bg-blue-300"
+        >
+          {isDownloading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
+          <span className="font-bold">{isDownloading ? "PDF 생성 중..." : "리포트 다운로드"}</span>
+        </button>
       </div>
 
-      <div className="grid grid-cols-3 gap-8">
-        {/* 왼쪽 섹션 (이미지 + 근거 요약) */}
-        <div className="col-span-2 space-y-6">
-          
-          {/* 1. 검사 이미지 박스 */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-medium text-gray-900">검사 이미지</h2>
-              <div className="flex items-center gap-2">
+      <div className="grid grid-cols-12 gap-8">
+        {/* 메인 분석 콘텐츠 (좌측 8컬럼) */}
+        <div className="col-span-8 space-y-6">
+          {/* 이미지 카드 */}
+          <div className="bg-white border border-gray-200 rounded-2xl p-6 shadow-sm">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl font-bold text-gray-900">검사 이미지</h2>
+              <div className="flex gap-1 bg-gray-100 p-1 rounded-xl">
                 {(["original", "heatmap", "overlay"] as const).map((k) => (
                   <button
                     key={k}
                     onClick={() => setActiveTab(k)}
-                    className={`px-3 py-1.5 text-sm rounded ${
-                      activeTab === k ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                    className={`px-4 py-1.5 text-xs font-black rounded-lg transition-all ${
+                      activeTab === k ? "bg-white text-blue-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
                     }`}
                   >
-                    {k === "original" ? "원본" : k === "heatmap" ? "Heatmap" : "Overlay"}
+                    {k.toUpperCase()}
                   </button>
                 ))}
               </div>
             </div>
             <ImagePanel caseData={caseData} active={activeTab} />
-            <div className="grid grid-cols-2 gap-4 text-sm">
-              <div>
-                <span className="text-gray-500">이미지 ID:</span>
-                <span className="ml-2 font-mono text-gray-900">{caseData.image_id}</span>
-              </div>
-            </div>
           </div>
 
-          {/* 2. 근거 요약 박스 */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
-            <h2 className="text-lg font-medium text-gray-900 mb-6">근거 요약</h2>
-
-            <div className="grid grid-cols-3 gap-6 mb-8">
-              <div>
-                <label className="text-sm font-medium text-gray-500 uppercase block mb-2">결함 타입</label>
-                <p className="text-lg text-gray-900 font-semibold">{defectTypeLabel(caseData.defect_type)}</p>
+          {/* AI 분석 리포트 카드 */}
+          <div className="bg-white border border-gray-200 rounded-2xl p-6 shadow-sm">
+            <h2 className="text-xl font-bold text-gray-900 mb-6">AI 심층 분석 리포트</h2>
+            <div className="grid grid-cols-3 gap-4 mb-8">
+              <div className="bg-gray-50 p-4 rounded-2xl border border-gray-100">
+                <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Defect Type</span>
+                <p className="text-lg font-bold text-gray-900 mt-1">{defectTypeLabel(caseData.defect_type)}</p>
               </div>
-              <div>
-                <label className="text-sm font-medium text-gray-500 uppercase block mb-2">위치</label>
-                <p className="text-lg text-gray-900 font-semibold">{locationLabel(caseData.location)}</p>
+              <div className="bg-gray-50 p-4 rounded-2xl border border-gray-100">
+                <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Location</span>
+                <p className="text-lg font-bold text-gray-900 mt-1">{locationLabel(caseData.location)}</p>
               </div>
-              <div>
-                <label className="text-sm font-medium text-gray-500 uppercase block mb-2">영향 면적</label>
-                <p className="text-lg text-gray-900 font-semibold">{caseData.affected_area_pct.toFixed(1)}%</p>
+              <div className="bg-gray-50 p-4 rounded-2xl border border-gray-100">
+                <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Affected Area</span>
+                <p className="text-lg font-bold text-gray-900 mt-1">{caseData.affected_area_pct?.toFixed(2)}%</p>
               </div>
             </div>
 
-            <div className="bg-blue-50 border border-blue-100 rounded-lg p-5">
-              <label className="text-sm font-bold text-blue-900 uppercase block mb-3 flex items-center gap-2">
-                <Activity className={`w-4 h-4 ${!isLlmComplete ? 'animate-pulse' : ''}`} />
-                AI 분석 요약
-              </label>
-              
-              {isLlmComplete ? (
-                <div className="space-y-3 text-sm text-blue-900 leading-relaxed">
-                  <p className="whitespace-pre-wrap">{llmView.summary}</p>
-                  {llmView.description && (
-                    <p><span className="font-semibold">상세 분석:</span> {llmView.description}</p>
-                  )}
-                  {llmView.cause && (
-                    <p><span className="font-semibold">원인 추정:</span> {llmView.cause}</p>
-                  )}
-                  {llmView.recommendation && (
-                    <p><span className="font-semibold">권고 조치:</span> {llmView.recommendation}</p>
-                  )}
-                </div>
-              ) : (
-                <div className="flex items-center gap-3 py-2">
-                  <Loader2 className={`w-4 h-4 text-blue-500 ${isLlmProcessing ? "animate-spin" : ""}`} />
-                  <p className="text-sm text-blue-700 font-medium italic">
-                    {isLlmFailed
-                      ? `LLM 분석 실패${llmView.pipelineError ? `: ${llmView.pipelineError}` : ""}`
-                      : isLlmProcessing
-                        ? "LLM 분석 진행 중..."
-                        : "LLM 분석 결과가 아직 없습니다. (생성 실패 또는 미완료)"}
-                  </p>
-                </div>
-              )}
+            <div className="bg-blue-50/50 border border-blue-100 rounded-2xl p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <Activity className={`w-5 h-5 text-blue-600 ${!isLlmComplete ? 'animate-pulse' : ''}`} />
+                <h3 className="font-bold text-blue-900 text-lg">AI 상세 분석 요약</h3>
+              </div>
+              <p className="text-sm text-blue-800 leading-relaxed whitespace-pre-wrap font-medium">
+                {isLlmComplete ? cleanSummary : "AI가 이미지를 심층 분석하여 결과를 생성하고 있습니다..."}
+              </p>
             </div>
           </div>
         </div>
 
-        {/* 오른쪽 섹션 (자율 판정 + 내보내기) */}
-        <div className="space-y-6">
-          
-          {/* 3. 자율 시스템 판정 및 타임라인 */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-lg font-medium text-gray-900 flex items-center gap-2">
-                <ShieldCheck className="w-5 h-5 text-green-600" />
-                자율 시스템 판정
-              </h2>
-              <Badge variant={caseData.decision} className="text-sm px-3 py-1">
-                {decisionLabel(caseData.decision)}
-              </Badge>
+        {/* 사이드바 정보 (우측 4컬럼) */}
+        <div className="col-span-4 space-y-6">
+          <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
+            {/* 판정 결과 헤더 */}
+            <div className={`p-6 border-b border-gray-100 ${
+              caseData.decision === 'ng' || caseData.decision === 'anomaly' ? 'bg-red-50/50' : 'bg-green-50/50'
+            }`}>
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                  <ShieldCheck className={`w-5 h-5 ${
+                    caseData.decision === 'ng' || caseData.decision === 'anomaly' ? 'text-red-600' : 'text-green-600'
+                  }`} /> 자율 판정 결과
+                </h2>
+                <Badge variant={caseData.decision}>{decisionLabel(caseData.decision)}</Badge>
+              </div>
             </div>
 
-            <div className="space-y-6">
-              <div className="bg-gray-50 rounded-lg p-4 border border-gray-100">
-                <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2">
-                  <Clock className="w-3 h-3" />
-                  Processing History
+            <div className="p-6">
+              {/* 스코어 정보 */}
+              <div className="grid grid-cols-2 gap-4 mb-8">
+                <div className="space-y-1">
+                  <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Anomaly Score</span>
+                  <p className="text-2xl font-mono font-black text-gray-900 tracking-tighter">
+                    {caseData.anomaly_score?.toFixed(4)}
+                  </p>
+                </div>
+                <div className="space-y-1 border-l border-gray-100 pl-4">
+                  <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Confidence</span>
+                  <p className="text-2xl font-mono font-black text-gray-900 tracking-tighter">
+                    {(caseData.defect_confidence ? caseData.defect_confidence * 100 : 0).toFixed(1)}%
+                  </p>
+                </div>
+              </div>
+
+              {/* 히스토리 타임라인 */}
+              <div className="pt-6 border-t border-gray-100">
+                <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-6 flex items-center gap-2">
+                  <Clock className="w-3.5 h-3.5" /> Processing History
                 </h3>
-                
-                <div className="space-y-5">
-                  <div className="flex gap-3">
-                    <div className="w-1.5 h-1.5 rounded-full bg-blue-500 mt-1.5 shadow-[0_0_8px_rgba(59,130,246,0.3)]"></div>
-                    <div>
-                      <p className="text-sm font-semibold text-gray-900">AD 분석 완료</p>
-                      <p className="text-[11px] text-gray-500 mt-0.5">{formattedDate}</p>
+                <div className="relative space-y-8 ml-1">
+                  {/* 타임라인 실선 */}
+                  <div className="absolute left-[3px] top-2 bottom-2 w-[1.5px] bg-gray-100" />
+
+                  {/* 단계 1 */}
+                  <div className="relative flex gap-4 items-start">
+                    <div className="relative z-10 w-2 h-2 rounded-full bg-blue-500 ring-4 ring-blue-50 mt-1" />
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-gray-800">이상 탐지 분석 완료</p>
+                      <p className="text-[10px] text-gray-400 font-medium">{formattedDate}</p>
                     </div>
                   </div>
 
-                  <div className="flex gap-3">
-                    <div className={`w-1.5 h-1.5 rounded-full mt-1.5 ${
-                      isLlmComplete ? 'bg-green-500' : isLlmFailed ? 'bg-red-400' : 'bg-blue-400'
-                    }`}></div>
-                    <div>
-                      <p className={`text-sm font-semibold ${
-                        isLlmComplete ? 'text-gray-900' : isLlmFailed ? 'text-red-600' : 'text-blue-700'
-                      }`}>
-                        {isLlmComplete ? "최종 판정 기록 완료" : isLlmFailed ? "LLM 분석 실패" : "LLM 분석 진행 중"}
+                  {/* 단계 2 (동적 상태) */}
+                  <div className="relative flex gap-4 items-start">
+                    <div className={`relative z-10 w-2 h-2 rounded-full mt-1 transition-all duration-500 ${
+                      isLlmComplete 
+                        ? 'bg-green-500 ring-4 ring-green-50' 
+                        : 'bg-blue-300 animate-pulse ring-4 ring-blue-50'
+                    }`} />
+                    <div className="space-y-1">
+                      <p className={`text-xs font-bold ${isLlmComplete ? 'text-gray-900' : 'text-blue-600'}`}>
+                        {isLlmComplete ? "최종 AI 리포트 생성 완료" : "심층 분석 리포트 생성 중"}
                       </p>
-                      {isLlmComplete ? (
-                        <p className="text-[11px] text-gray-500 mt-0.5">데이터베이스 동기화 성공</p>
-                      ) : (
-                        <div className="flex items-center gap-1.5 mt-1">
-                          {!isLlmFailed && <span className="inline-block w-1 h-1 bg-blue-400 rounded-full animate-bounce"></span>}
-                          <p className={`text-[11px] font-medium tracking-tight ${isLlmFailed ? "text-red-500" : "text-blue-500"}`}>
-                            {isLlmFailed
-                              ? (llmView.pipelineError || "로그를 확인해주세요.")
-                              : (llmView.pipelineStage || "AI 분석 결과 대기 중...")}
-                          </p>
-                        </div>
-                      )}
+                      <p className="text-[10px] text-gray-400 font-medium leading-tight">
+                        {isLlmComplete ? "데이터베이스 동기화 완료" : "AI Pipeline이 이미지를 분석하고 있습니다."}
+                      </p>
                     </div>
                   </div>
                 </div>
               </div>
             </div>
           </div>
+        </div>
+      </div>
 
-          {/* 4. 내보내기 박스 */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
-            <h2 className="text-lg font-medium text-gray-900 mb-4">내보내기</h2>
-            <button
-              onClick={() => alert("리포트를 PDF 형식으로 내보냅니다.")}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
-            >
-              <Download className="w-4 h-4" />
-              <span>PDF 다운로드</span>
-            </button>
-          </div>
+      {/* PDF용 숨겨진 렌더링 영역 */}
+      <div style={{ position: 'absolute', top: '-10000px', left: 0, opacity: 0 }}>
+        <div ref={reportRef} style={{ width: '794px', padding: '0', margin: '0' }}>
+          <ReportTemplate reportData={pdfReportData} />
         </div>
       </div>
     </div>

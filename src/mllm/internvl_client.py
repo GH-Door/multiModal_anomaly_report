@@ -339,9 +339,12 @@ class InternVLClient(BaseLLMClient):
         category: str,
         ad_info: Optional[Dict] = None,
         few_shot_paths: Optional[List[str]] = None,
+        instruction: Optional[str] = None,
     ) -> dict:
         refs = few_shot_paths or []
-        if ad_info:
+        if instruction:
+            prompt = instruction.strip()
+        elif ad_info:
             prompt = REPORT_PROMPT_WITH_AD.format(category=category, ad_info=format_ad_info(ad_info)).strip()
         else:
             prompt = REPORT_PROMPT.format(category=category).strip()
@@ -377,6 +380,7 @@ class InternVLClient(BaseLLMClient):
         questions: List[Dict[str, str]],
         ad_info: Optional[Dict] = None,
         instruction: Optional[str] = None,
+        report_mode: bool = False,
     ) -> dict:
         """Build InternVL message format."""
         # Select instruction: custom > AD > default
@@ -395,10 +399,13 @@ class InternVLClient(BaseLLMClient):
                 prompt += "\n<image>\n"
 
         prompt += "Following is the query image:\n<image>\n"
-        prompt += "Following is the question list. Answer with the option's letter from the given choices directly:\n"
-
-        for q in questions:
-            prompt += f"{q['text']}\n"
+        if report_mode:
+            for q in questions:
+                prompt += f"{q['text']}\n"
+        else:
+            prompt += "Following is the question list. Answer with the option's letter from the given choices directly:\n"
+            for q in questions:
+                prompt += f"{q['text']}\n"
 
         return {
             "prompt": prompt,

@@ -21,6 +21,7 @@ from pydantic import BaseModel
 import src.storage.pg as pg
 from src.mllm.factory import get_llm_client, list_llm_models
 from src.service.ad_service import AdService
+from src.service.domain_rag_service import DomainKnowledgeRagService
 from src.service.llm_service import LlmService
 from src.service.visual_rag_service import RagService
 
@@ -31,11 +32,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.getenv("DATABASE_URL", os.getenv("PG_DSN", "postgresql://son:1234@localhost/inspection"))
 MODEL_NAME = os.getenv("LLM_MODEL", "internvl")
 CHECKPOINT_DIR = Path(os.getenv("AD_CHECKPOINT_DIR", str(PROJECT_ROOT / "checkpoints")))
-RAG_INDEX_DIR = Path(os.getenv("RAG_INDEX_DIR", str(PROJECT_ROOT / "rag_index")))
+RAG_INDEX_DIR = Path(os.getenv("RAG_INDEX_DIR", str(PROJECT_ROOT / "rag")))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(PROJECT_ROOT / "outputs")))
 DATA_DIR = Path(os.getenv("DATA_DIR", str(PROJECT_ROOT / "datasets")))
 AD_POLICY_PATH = Path(os.getenv("AD_POLICY_PATH", str(PROJECT_ROOT / "configs" / "ad_policy.json")))
 AD_CALIBRATION_PATH = Path(os.getenv("AD_CALIBRATION_PATH", str(PROJECT_ROOT / "configs" / "ad_calibration.json")))
+DOMAIN_KNOWLEDGE_JSON_PATH = Path(
+    os.getenv("DOMAIN_KNOWLEDGE_JSON_PATH", str(DATA_DIR / "domain_knowledge.json"))
+)
+DOMAIN_RAG_PERSIST_DIR = Path(
+    os.getenv("DOMAIN_RAG_PERSIST_DIR", str(PROJECT_ROOT / "vectorstore" / "domain_knowledge"))
+)
+DOMAIN_RAG_TOP_K = max(1, int(os.getenv("DOMAIN_RAG_TOP_K", "3")))
 
 INCOMING_ROOT = Path(os.getenv("INCOMING_ROOT", "/home/ubuntu/incoming"))
 INCOMING_SCAN_INTERVAL_SEC = float(os.getenv("INCOMING_SCAN_INTERVAL_SEC", "5"))
@@ -61,6 +69,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 INCOMING_WATCH_ENABLED = _env_bool("INCOMING_WATCH_ENABLED", True)
 RAG_ENABLED = _env_bool("RAG_ENABLED", True)
+DOMAIN_RAG_ENABLED = _env_bool("DOMAIN_RAG_ENABLED", True)
 
 LLM_MODEL_ALIASES = {
     "internv1": "internvl",
@@ -89,7 +98,20 @@ class LocalImageUpload:
             pass
 
 
-class CachedStaticFiles(StaticFiles):
+class CorsStaticFiles(StaticFiles):
+    """Static file mount that always exposes CORS headers for browser-side rendering."""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):  # type: ignore[override]
+        response = super().file_response(full_path, stat_result, scope, status_code=status_code)
+        if getattr(response, "status_code", 0) == 200:
+            response.headers.setdefault("Access-Control-Allow-Origin", "*")
+            response.headers.setdefault("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS")
+            response.headers.setdefault("Access-Control-Allow-Headers", "*")
+            response.headers.setdefault("Cross-Origin-Resource-Policy", "cross-origin")
+        return response
+
+
+class CachedStaticFiles(CorsStaticFiles):
     """Static file mount with cache headers for immutable output filenames."""
 
     def file_response(self, full_path, stat_result, scope, status_code=200):  # type: ignore[override]
@@ -119,6 +141,51 @@ def _load_ad_policy_doc(path: Path) -> dict[str, Any]:
 
 def _load_ad_calibration_doc(path: Path) -> dict[str, Any]:
     return _load_json_doc(path, label="AD calibration")
+
+
+def _sync_category_metadata_from_policy_doc(conn, doc: dict[str, Any], *, default_line: str | None = None) -> int:
+    """Seed/update category_metadata from ad_policy.json classes."""
+    classes = doc.get("classes") if isinstance(doc, dict) else None
+    if not isinstance(classes, dict):
+        logger.warning("Skip category_metadata sync: AD policy has no valid classes object")
+        return 0
+
+    rows: list[dict[str, Any]] = []
+    for class_key in classes.keys():
+        if not isinstance(class_key, str):
+            continue
+        key = class_key.strip().strip("/")
+        if not key:
+            continue
+
+        policy = _resolve_class_policy_from_json(doc, key)
+        if not policy:
+            continue
+
+        dataset: str | None = None
+        if "/" in key:
+            dataset = key.split("/", 1)[0].strip() or None
+
+        row: dict[str, Any] = {
+            "category": key,
+            "dataset": dataset,
+            "line": default_line or None,
+            "t_low": policy.get("t_low"),
+            "t_high": policy.get("t_high"),
+            "review_band": policy.get("review_band"),
+            "reliability": policy.get("reliability"),
+        }
+        rows.append(row)
+
+    if not rows:
+        logger.warning("Skip category_metadata sync: no valid class policy rows")
+        return 0
+
+    try:
+        return pg.upsert_category_metadata(conn, rows)
+    except Exception:
+        logger.exception("Failed to sync category_metadata from AD policy doc")
+        return 0
 
 
 def _safe_float(value: Any) -> float | None:
@@ -522,7 +589,10 @@ def _set_llm_model(app: FastAPI, model_name: str) -> None:
         logger.info("Normalized LLM model alias: %s -> %s", selected, normalized)
     selected = normalized
     app.state.llm_client = get_llm_client(selected)
-    app.state.llm_service = LlmService(client=app.state.llm_client)
+    app.state.llm_service = LlmService(
+        client=app.state.llm_client,
+        domain_rag_service=getattr(app.state, "domain_rag_service", None),
+    )
     app.state.llm_model = selected
 
 
@@ -970,15 +1040,37 @@ async def _pipeline_watchdog_loop() -> None:
 async def lifespan(app: FastAPI):
     # Boot-time DB connectivity and additive migrations
     bootstrap_conn = pg.connect(DATABASE_URL, ensure_schema=True)
+    ad_policy_doc = _load_ad_policy_doc(AD_POLICY_PATH)
+    class_count = len(ad_policy_doc.get("classes", {})) if isinstance(ad_policy_doc, dict) else 0
+    logger.info(
+        "Boot policy sync start | ad_policy_path=%s classes=%d",
+        AD_POLICY_PATH,
+        class_count,
+    )
+    synced = _sync_category_metadata_from_policy_doc(
+        bootstrap_conn,
+        ad_policy_doc,
+        default_line=INCOMING_DEFAULT_LINE,
+    )
+    if synced > 0:
+        logger.info("Synced %d category_metadata row(s) from AD policy doc", synced)
+    else:
+        logger.warning("No category_metadata rows synced from AD policy doc")
     bootstrap_conn.close()
 
     app.state.ad_service = AdService(
         checkpoint_dir=str(CHECKPOINT_DIR),
         output_root=str(OUTPUT_DIR),
     )
-    app.state.ad_policy_doc = _load_ad_policy_doc(AD_POLICY_PATH)
+    app.state.ad_policy_doc = ad_policy_doc
     app.state.ad_calibration_doc = _load_ad_calibration_doc(AD_CALIBRATION_PATH)
     app.state.rag_service = RagService(index_dir=str(RAG_INDEX_DIR))
+    app.state.domain_rag_service = DomainKnowledgeRagService(
+        json_path=str(DOMAIN_KNOWLEDGE_JSON_PATH),
+        persist_dir=str(DOMAIN_RAG_PERSIST_DIR),
+        enabled=DOMAIN_RAG_ENABLED,
+        top_k=DOMAIN_RAG_TOP_K,
+    )
     _set_llm_model(app, MODEL_NAME)
     app.state.inspect_lock = threading.Lock()
     app.state.llm_lock = threading.Lock()
@@ -1017,14 +1109,14 @@ app = FastAPI(title="Industrial AI Inspection System", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/outputs", CachedStaticFiles(directory=str(OUTPUT_DIR), check_dir=False), name="outputs")
-app.mount("/data/datasets", StaticFiles(directory=str(DATA_DIR), check_dir=False), name="datasets")
+app.mount("/home/ubuntu/dataset", CorsStaticFiles(directory=str(DATA_DIR), check_dir=False), name="datasets")
 
 
 @app.get("/settings/llm-model")
@@ -1064,6 +1156,10 @@ async def get_incoming_status():
         "pipeline_watchdog_interval_sec": PIPELINE_WATCHDOG_INTERVAL_SEC,
         "pipeline_stale_seconds": PIPELINE_STALE_SECONDS,
         "rag_enabled": RAG_ENABLED,
+        "domain_rag_enabled": DOMAIN_RAG_ENABLED,
+        "domain_rag_json_path": str(DOMAIN_KNOWLEDGE_JSON_PATH),
+        "domain_rag_persist_dir": str(DOMAIN_RAG_PERSIST_DIR),
+        "domain_rag_top_k": DOMAIN_RAG_TOP_K,
         "default_dataset": INCOMING_DEFAULT_DATASET,
         "default_category": INCOMING_DEFAULT_CATEGORY,
         "default_line": INCOMING_DEFAULT_LINE,
