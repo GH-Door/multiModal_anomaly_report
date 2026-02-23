@@ -1,6 +1,34 @@
 from __future__ import annotations
 
+import logging
+import os
+from pathlib import Path
 from typing import Any, Dict
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_few_shot_path(ref_path: str) -> str | None:
+    candidate = Path(ref_path)
+    if candidate.exists():
+        return str(candidate)
+
+    data_dir = os.getenv("DATA_DIR")
+    if not data_dir:
+        return None
+
+    data_root = Path(data_dir)
+    prefixes = (
+        "/home/ubuntu/dataset/",
+    )
+    for prefix in prefixes:
+        if not ref_path.startswith(prefix):
+            continue
+        suffix = ref_path[len(prefix) :]
+        mapped = data_root / suffix
+        if mapped.exists():
+            return str(mapped)
+    return None
 
 
 class LlmService:
@@ -19,6 +47,14 @@ class LlmService:
     ) -> Dict[str, Any]:
         del policy  # reserved for future prompt control
         ad_decision_raw = str(ad_data.get("ad_decision", "review_needed"))
+        few_shot_paths: list[str] = []
+        if ref_path:
+            resolved = _resolve_few_shot_path(ref_path)
+            if resolved:
+                few_shot_paths = [resolved]
+            else:
+                logger.warning("Skipping unavailable RAG reference image for LLM: %s", ref_path)
+
         ad_info = {
             "anomaly_score": ad_data.get("ad_score", 0.0),
             "is_anomaly": ad_decision_raw.lower() == "anomaly",
@@ -31,7 +67,7 @@ class LlmService:
             image_path=image_path,
             category=category,
             ad_info=ad_info,
-            few_shot_paths=[ref_path] if ref_path else [],
+            few_shot_paths=few_shot_paths,
         )
         return {
             "is_anomaly_llm": result.get("is_anomaly_LLM"),

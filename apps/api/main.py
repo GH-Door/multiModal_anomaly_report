@@ -1037,7 +1037,7 @@ app.add_middleware(
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/outputs", CachedStaticFiles(directory=str(OUTPUT_DIR), check_dir=False), name="outputs")
-app.mount("/data/datasets", CorsStaticFiles(directory=str(DATA_DIR), check_dir=False), name="datasets")
+app.mount("/home/ubuntu/dataset", CorsStaticFiles(directory=str(DATA_DIR), check_dir=False), name="datasets")
 
 
 @app.get("/settings/llm-model")
