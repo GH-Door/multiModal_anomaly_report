@@ -169,29 +169,70 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
     };
   }, [caseData, llmSummaryForPdf]);
 
+  const waitForReportImages = async (root: HTMLElement) => {
+    const images = Array.from(root.querySelectorAll("img"));
+    await Promise.all(
+      images.map((img) => {
+        if (img.complete) return Promise.resolve();
+        return new Promise<void>((resolve) => {
+          const done = () => resolve();
+          img.addEventListener("load", done, { once: true });
+          img.addEventListener("error", done, { once: true });
+        });
+      })
+    );
+  };
+
+  const renderReportCanvas = async (element: HTMLElement, hideImages: boolean) =>
+    html2canvas(element, {
+      scale: 2,
+      useCORS: true,
+      imageTimeout: 15000,
+      logging: false,
+      backgroundColor: "#ffffff",
+      onclone: (doc) => {
+        if (!hideImages) return;
+        doc.querySelectorAll("img").forEach((img) => {
+          (img as HTMLImageElement).style.visibility = "hidden";
+        });
+      },
+    });
+
   const handleDownloadPdf = async () => {
     if (!reportRef.current) return;
-    
+
     setIsDownloading(true);
     try {
       const element = reportRef.current;
-      const canvas = await html2canvas(element, {
-        scale: 2,
-        useCORS: true, 
-        logging: false,
-        backgroundColor: "#ffffff",
-      });
-      
-      const imgData = canvas.toDataURL("image/png");
+      await waitForReportImages(element);
+
+      let imgData: string;
+      let fallbackWithoutImages = false;
+
+      try {
+        const canvas = await renderReportCanvas(element, false);
+        imgData = canvas.toDataURL("image/png");
+      } catch (captureError) {
+        console.warn("PDF 이미지 캡처 실패. 이미지 제외 fallback으로 재시도합니다.", captureError);
+        const canvas = await renderReportCanvas(element, true);
+        imgData = canvas.toDataURL("image/png");
+        fallbackWithoutImages = true;
+      }
+
       const pdf = new jsPDF("p", "mm", "a4");
       const pdfWidth = pdf.internal.pageSize.getWidth();
-      const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+      const imgProps = pdf.getImageProperties(imgData);
+      const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
 
       pdf.addImage(imgData, "PNG", 0, 0, pdfWidth, pdfHeight);
       pdf.save(`Inspection_Report_${caseData.image_id || caseData.id}.pdf`);
+      if (fallbackWithoutImages) {
+        alert("이미지 접근 제한(CORS)으로 텍스트 중심 PDF로 저장되었습니다.");
+      }
     } catch (error) {
       console.error("PDF 생성 실패:", error);
-      alert("PDF 생성 중 오류가 발생했습니다.");
+      const message = error instanceof Error ? error.message : String(error ?? "");
+      alert(`PDF 생성 중 오류가 발생했습니다.${message ? `\n사유: ${message}` : ""}`);
     } finally {
       setIsDownloading(false);
     }

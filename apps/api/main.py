@@ -89,7 +89,20 @@ class LocalImageUpload:
             pass
 
 
-class CachedStaticFiles(StaticFiles):
+class CorsStaticFiles(StaticFiles):
+    """Static file mount that always exposes CORS headers for browser-side rendering."""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):  # type: ignore[override]
+        response = super().file_response(full_path, stat_result, scope, status_code=status_code)
+        if getattr(response, "status_code", 0) == 200:
+            response.headers.setdefault("Access-Control-Allow-Origin", "*")
+            response.headers.setdefault("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS")
+            response.headers.setdefault("Access-Control-Allow-Headers", "*")
+            response.headers.setdefault("Cross-Origin-Resource-Policy", "cross-origin")
+        return response
+
+
+class CachedStaticFiles(CorsStaticFiles):
     """Static file mount with cache headers for immutable output filenames."""
 
     def file_response(self, full_path, stat_result, scope, status_code=200):  # type: ignore[override]
@@ -1017,14 +1030,14 @@ app = FastAPI(title="Industrial AI Inspection System", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/outputs", CachedStaticFiles(directory=str(OUTPUT_DIR), check_dir=False), name="outputs")
-app.mount("/data/datasets", StaticFiles(directory=str(DATA_DIR), check_dir=False), name="datasets")
+app.mount("/data/datasets", CorsStaticFiles(directory=str(DATA_DIR), check_dir=False), name="datasets")
 
 
 @app.get("/settings/llm-model")
