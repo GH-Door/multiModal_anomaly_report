@@ -117,6 +117,7 @@ export function FilterBar({ filters, onFilterChange }: FilterBarProps) {
             <option value="crack">{labelOf(defectTypeLabelRaw, "crack")}</option>
             <option value="missing_component">{labelOf(defectTypeLabelRaw, "missing_component")}</option>
             <option value="scratch">{labelOf(defectTypeLabelRaw, "scratch")}</option>
+            <option value="other">{labelOf(defectTypeLabelRaw, "other")}</option>
           </select>
 
           <select

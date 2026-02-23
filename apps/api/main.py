@@ -143,6 +143,51 @@ def _load_ad_calibration_doc(path: Path) -> dict[str, Any]:
     return _load_json_doc(path, label="AD calibration")
 
 
+def _sync_category_metadata_from_policy_doc(conn, doc: dict[str, Any], *, default_line: str | None = None) -> int:
+    """Seed/update category_metadata from ad_policy.json classes."""
+    classes = doc.get("classes") if isinstance(doc, dict) else None
+    if not isinstance(classes, dict):
+        logger.warning("Skip category_metadata sync: AD policy has no valid classes object")
+        return 0
+
+    rows: list[dict[str, Any]] = []
+    for class_key in classes.keys():
+        if not isinstance(class_key, str):
+            continue
+        key = class_key.strip().strip("/")
+        if not key:
+            continue
+
+        policy = _resolve_class_policy_from_json(doc, key)
+        if not policy:
+            continue
+
+        dataset: str | None = None
+        if "/" in key:
+            dataset = key.split("/", 1)[0].strip() or None
+
+        row: dict[str, Any] = {
+            "category": key,
+            "dataset": dataset,
+            "line": default_line or None,
+            "t_low": policy.get("t_low"),
+            "t_high": policy.get("t_high"),
+            "review_band": policy.get("review_band"),
+            "reliability": policy.get("reliability"),
+        }
+        rows.append(row)
+
+    if not rows:
+        logger.warning("Skip category_metadata sync: no valid class policy rows")
+        return 0
+
+    try:
+        return pg.upsert_category_metadata(conn, rows)
+    except Exception:
+        logger.exception("Failed to sync category_metadata from AD policy doc")
+        return 0
+
+
 def _safe_float(value: Any) -> float | None:
     try:
         if value is None:
@@ -995,13 +1040,29 @@ async def _pipeline_watchdog_loop() -> None:
 async def lifespan(app: FastAPI):
     # Boot-time DB connectivity and additive migrations
     bootstrap_conn = pg.connect(DATABASE_URL, ensure_schema=True)
+    ad_policy_doc = _load_ad_policy_doc(AD_POLICY_PATH)
+    class_count = len(ad_policy_doc.get("classes", {})) if isinstance(ad_policy_doc, dict) else 0
+    logger.info(
+        "Boot policy sync start | ad_policy_path=%s classes=%d",
+        AD_POLICY_PATH,
+        class_count,
+    )
+    synced = _sync_category_metadata_from_policy_doc(
+        bootstrap_conn,
+        ad_policy_doc,
+        default_line=INCOMING_DEFAULT_LINE,
+    )
+    if synced > 0:
+        logger.info("Synced %d category_metadata row(s) from AD policy doc", synced)
+    else:
+        logger.warning("No category_metadata rows synced from AD policy doc")
     bootstrap_conn.close()
 
     app.state.ad_service = AdService(
         checkpoint_dir=str(CHECKPOINT_DIR),
         output_root=str(OUTPUT_DIR),
     )
-    app.state.ad_policy_doc = _load_ad_policy_doc(AD_POLICY_PATH)
+    app.state.ad_policy_doc = ad_policy_doc
     app.state.ad_calibration_doc = _load_ad_calibration_doc(AD_CALIBRATION_PATH)
     app.state.rag_service = RagService(index_dir=str(RAG_INDEX_DIR))
     app.state.domain_rag_service = DomainKnowledgeRagService(

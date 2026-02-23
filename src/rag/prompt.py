@@ -100,7 +100,7 @@ label_defect, print_defect, missing_part, misalignment, color_stain, other, none
     "recommendation": "구체적 시정/예방 조치(한국어)"
   }}}},
   "summary": {{{{
-    "summary": "정확히 2문장: 최종 판정 + 핵심 근거/긴급도(한국어)",
+    "summary": "정확히 3문장: 최종 판정 + 핵심 근거/긴급도 + 구체적 시정/예방조치(한국어)",
     "risk_level": "low/medium/high/none"
   }}}}
 }}}}'''

@@ -425,6 +425,74 @@ def get_category_policy(conn: psycopg2.extensions.connection, category: str) -> 
     }
 
 
+def upsert_category_metadata(
+    conn: psycopg2.extensions.connection,
+    rows: List[Dict[str, Any]],
+) -> int:
+    """Upsert category threshold metadata rows.
+
+    Args:
+        rows: List of dicts with at least ``category`` key.
+              Supported keys: dataset, line, t_low, t_high, review_band, reliability,
+              ad_weight, location_mode, min_location_confidence, use_bbox.
+
+    Returns:
+        Number of rows attempted for upsert.
+    """
+    if not rows:
+        return 0
+
+    sql = """
+    INSERT INTO category_metadata (
+      category, dataset, line, t_low, t_high, review_band, reliability,
+      ad_weight, location_mode, min_location_confidence, use_bbox
+    ) VALUES (
+      %(category)s, %(dataset)s, %(line)s, %(t_low)s, %(t_high)s, %(review_band)s, %(reliability)s,
+      %(ad_weight)s, %(location_mode)s, %(min_location_confidence)s, %(use_bbox)s
+    )
+    ON CONFLICT (category) DO UPDATE SET
+      dataset = COALESCE(EXCLUDED.dataset, category_metadata.dataset),
+      line = COALESCE(EXCLUDED.line, category_metadata.line),
+      t_low = COALESCE(EXCLUDED.t_low, category_metadata.t_low),
+      t_high = COALESCE(EXCLUDED.t_high, category_metadata.t_high),
+      review_band = COALESCE(EXCLUDED.review_band, category_metadata.review_band),
+      reliability = COALESCE(EXCLUDED.reliability, category_metadata.reliability),
+      ad_weight = COALESCE(EXCLUDED.ad_weight, category_metadata.ad_weight),
+      location_mode = COALESCE(EXCLUDED.location_mode, category_metadata.location_mode),
+      min_location_confidence = COALESCE(EXCLUDED.min_location_confidence, category_metadata.min_location_confidence),
+      use_bbox = COALESCE(EXCLUDED.use_bbox, category_metadata.use_bbox)
+    """
+
+    payload_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        category = str(row.get("category", "")).strip()
+        if not category:
+            continue
+        payload_rows.append(
+            {
+                "category": category,
+                "dataset": row.get("dataset"),
+                "line": row.get("line"),
+                "t_low": row.get("t_low"),
+                "t_high": row.get("t_high"),
+                "review_band": row.get("review_band"),
+                "reliability": row.get("reliability"),
+                "ad_weight": row.get("ad_weight"),
+                "location_mode": row.get("location_mode"),
+                "min_location_confidence": row.get("min_location_confidence"),
+                "use_bbox": row.get("use_bbox"),
+            }
+        )
+
+    if not payload_rows:
+        return 0
+
+    with conn.cursor() as cur:
+        cur.executemany(sql, payload_rows)
+    conn.commit()
+    return len(payload_rows)
+
+
 def mark_stale_processing_reports(
     conn: psycopg2.extensions.connection,
     *,

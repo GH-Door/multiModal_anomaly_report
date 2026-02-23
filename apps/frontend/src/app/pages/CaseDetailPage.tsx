@@ -272,7 +272,7 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
                 <h3 className="font-bold text-blue-900 text-lg">AI 상세 분석 요약</h3>
               </div>
               <p className="text-sm text-blue-800 leading-relaxed whitespace-pre-wrap font-medium">
-                {llmView.summary || "AI가 이미지를 심층 분석하여 결과를 생성하고 있습니다..."}
+                {isLlmComplete ? cleanSummary : "AI가 이미지를 심층 분석하여 결과를 생성하고 있습니다..."}
               </p>
             </div>
           </div>

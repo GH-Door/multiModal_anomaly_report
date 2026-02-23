@@ -85,8 +85,7 @@ function toShift(d: Date): string {
 function normalizeDefectType(
   raw?: string,
   decision?: "OK" | "NG" | "REVIEW",
-  hintText?: string,
-  category?: string
+  hintText?: string
 ): string {
   if (decision === "OK") return "none";
   const v = (raw ?? "").trim().toLowerCase().replace(/\s+/g, "_").replace(/-/g, "_");
@@ -110,6 +109,10 @@ function normalizeDefectType(
     scratch: "scratch",
     scuff: "scratch",
     abrasion: "scratch",
+    other: "other",
+    기타: "other",
+    unknown: "other",
+    기타결함: "other",
     실링: "seal_issue",
     밀봉: "seal_issue",
     오염: "contamination",
@@ -133,17 +136,11 @@ function normalizeDefectType(
   if (/(missing|absence|lost|누락|결손|빠짐|없)/.test(text)) return "missing_component";
   if (/(scratch|scuff|abrasion|스크래치|긁힘)/.test(text)) return "scratch";
 
-  const cat = (category ?? "").toLowerCase();
-  if (cat.includes("cigarette_box")) {
-    // 담배곽은 개봉/실링 이슈 비중이 높아서 기본 fallback을 contamination이 아닌 seal_issue로 둔다.
-    return "seal_issue";
-  }
-
   if (["none", "normal", "ok", "good", "no_defect", "no-defect", ""].includes(v)) {
-    return decision === "OK" ? "none" : "contamination";
+    return decision === "OK" ? "none" : "other";
   }
-  // UI 필터 요구사항: 결함 타입은 지정된 5종 중 하나로 고정한다.
-  return decision === "OK" ? "none" : "contamination";
+  // 비표준/불명확 타입은 프론트에서 "기타"로 묶어 과도한 오분류를 줄인다.
+  return decision === "OK" ? "none" : "other";
 }
 
 function normalizeLocation(raw?: string, decision?: "OK" | "NG" | "REVIEW"): string {
@@ -250,8 +247,7 @@ export function mapReportsToAnomalyCases(raw: any[]): AnomalyCase[] {
         llmSummaryObj.summary,
         llmSummaryObj._text,
         r.defect_description,
-      ]),
-      category
+      ])
     );
     const loc = normalizeLocation(
       pickString([
