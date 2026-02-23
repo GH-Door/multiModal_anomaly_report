@@ -108,11 +108,10 @@ export function OverviewPage({ cases, alerts, activeModel }: OverviewPageProps) 
   return (
     <div className="p-6 space-y-6 bg-gray-50 min-h-full">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">개요</h1>
-        <p className="text-gray-500 mt-1">실시간 품질 검사 현황 및 이상 탐지 결과</p>
+        <h1 className="text-2xl font-bold text-gray-900">실시간 품질 검사 현황 및 이상 탐지 결과</h1>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <KPICard title="검사 수" value={agg.total.toLocaleString()} subtext="오늘 누적 검사량" icon={Activity} />
         <KPICard title="불량률" value={`${defectRate}%`} subtext="오늘 검사 대비 불량" icon={AlertTriangle} />
         <KPICard title="재검률" value={`${reviewRate}%`} subtext="AI 판정 보류 건" icon={CheckCircle} />
