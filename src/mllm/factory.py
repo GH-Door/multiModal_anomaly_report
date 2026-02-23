@@ -24,12 +24,17 @@ MODEL_REGISTRY = {
     "gemini-flash": {"type": "api", "class": "GeminiClient", "model": "gemini-1.5-flash"},
     "gemini-pro": {"type": "api", "class": "GeminiClient", "model": "gemini-1.5-pro"},
     "gemini-2.0-flash": {"type": "api", "class": "GeminiClient", "model": "gemini-2.0-flash-exp"},
+    "gemini-2.5-flash": {"type": "api", "class": "GeminiClient", "model": "gemini-2.5-flash"},
+    "gemini-2.5-flash-lite": {"type": "api", "class": "GeminiClient", "model": "gemini-2.5-flash-lite"},
+    "gemini-2.5-pro": {"type": "api", "class": "GeminiClient", "model": "gemini-2.5-pro"},
 
     # Qwen models
     "qwen": {"type": "local", "class": "QwenVLClient", "model": "Qwen/Qwen2.5-VL-7B-Instruct"},
     "qwen-7b": {"type": "local", "class": "QwenVLClient", "model": "Qwen/Qwen2.5-VL-7B-Instruct"},
     "qwen-2b": {"type": "local", "class": "QwenVLClient", "model": "Qwen/Qwen2.5-VL-2B-Instruct"},
     "qwen2-vl": {"type": "local", "class": "QwenVLClient", "model": "Qwen/Qwen2-VL-7B-Instruct"},
+    "qwen3-vl-2b": {"type": "local", "class": "QwenVLClient", "model": "Qwen/Qwen3-VL-2B-Instruct"},
+    "qwen3-vl-4b": {"type": "local", "class": "QwenVLClient", "model": "Qwen/Qwen3-VL-4B-Instruct"},
     "qwen3-vl-8b": {"type": "local", "class": "QwenVLClient", "model": "Qwen/Qwen3-VL-8B-Instruct"},
 
     # InternVL models
@@ -39,6 +44,7 @@ MODEL_REGISTRY = {
     "internvl-2b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL2-2B"},
     "internvl-1b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL2-1B"},
     "internvl2.5-8b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL2_5-8B"},
+    "internvl3.5-1b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL3_5-1B"},
     "internvl3.5-2b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL3_5-2B"},
     "internvl3.5-4b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL3_5-4B"},
     "internvl3.5-8b": {"type": "local", "class": "InternVLClient", "model": "OpenGVLab/InternVL3_5-8B"},
@@ -61,6 +67,18 @@ MODEL_REGISTRY = {
     "gemma3-4b": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-4b-it"},
     "gemma3-12b": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-12b-it"},
     "gemma3-27b": {"type": "local", "class": "Gemma3Client", "model": "google/gemma-3-27b-it"},
+    "gemma3-12b-qat": {
+        "type": "local",
+        "class": "Gemma3Client",
+        "model": "google/gemma-3-12b-it-qat-q4_0-unquantized",
+        "load_in_4bit": True,
+    },
+    "gemma3-4b-qat": {
+        "type": "local",
+        "class": "Gemma3Client",
+        "model": "google/gemma-3-4b-it-qat-q4_0-unquantized",
+        "load_in_4bit": True,
+    },
 
     # Gemma3 pre-quantized INT4 (TorchAO, requires torchao + CUDA)
     "gemma3-4b-int4": {"type": "local", "class": "Gemma3Client", "model": "pytorch/gemma-3-4b-it-HQQ-INT8-INT4"},
@@ -87,6 +105,10 @@ def get_llm_client(model_name: str, model_path: str = None, **kwargs) -> BaseLLM
     if model_lower in MODEL_REGISTRY:
         info = MODEL_REGISTRY[model_lower]
         actual_model = model_path or info["model"]
+        # Merge optional registry flags (e.g., load_in_4bit) unless explicitly overridden.
+        for k, v in info.items():
+            if k not in ("type", "class", "model") and k not in kwargs:
+                kwargs[k] = v
 
         if info["class"] == "GPT4Client":
             from .openai_client import GPT4Client
