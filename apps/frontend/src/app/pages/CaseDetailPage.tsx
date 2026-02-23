@@ -1,5 +1,5 @@
 // src/app/pages/CaseDetailPage.tsx
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useRef } from "react";
 import { Badge } from "../components/Badge";
 import {
   ChevronRight,
@@ -12,11 +12,21 @@ import {
 import type { AnomalyCase } from "../data/mockData";
 import { decisionLabel, defectTypeLabel, locationLabel } from "../utils/labels";
 import { getCaseImageUrl, type ImageVariant } from "../services/media";
+import jsPDF from "jspdf";
+import html2canvas from "html2canvas";
+import { ReportTemplate, type DBReport } from "../components/ReportTemplate";
 
 interface CaseDetailPageProps {
   caseData: AnomalyCase;
   onBackToQueue: () => void;
   onBackToOverview: () => void;
+}
+
+function normalizeDecisionForPdf(decision?: string): DBReport["decision"] {
+  const d = String(decision ?? "").trim().toLowerCase();
+  if (d === "ng" || d === "anomaly") return "ng";
+  if (d === "ok" || d === "normal") return "ok";
+  return "pending";
 }
 
 function ImagePanel({ caseData, active }: { caseData: AnomalyCase; active: ImageVariant }) {
@@ -44,8 +54,9 @@ function ImagePanel({ caseData, active }: { caseData: AnomalyCase; active: Image
 
 export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: CaseDetailPageProps) {
   const [activeTab, setActiveTab] = useState<ImageVariant>("original");
-  
-  // 날짜 변환 로직: 백엔드에서 온 문자열을 Date 객체로 안전하게 변환
+  const reportRef = useRef<HTMLDivElement>(null);
+  const [isDownloading, setIsDownloading] = useState(false);
+
   const formattedDate = useMemo(() => {
     const d = new Date(caseData.timestamp);
     return isNaN(d.getTime()) ? "N/A" : d.toLocaleString("ko-KR");
@@ -116,6 +127,75 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
     llmView.recommendation.length > 0;
   const isLlmProcessing = llmView.pipelineStatus === "processing";
   const isLlmFailed = llmView.pipelineStatus === "failed";
+  const llmFallbackText = isLlmFailed
+    ? `LLM 분석 실패${llmView.pipelineError ? `: ${llmView.pipelineError}` : ""}`
+    : isLlmProcessing
+      ? "LLM 분석 진행 중..."
+      : "LLM 분석 결과가 아직 없습니다. (생성 실패 또는 미완료)";
+  const llmSummaryForPdf = isLlmComplete
+    ? [
+        llmView.summary,
+        llmView.description ? `상세 분석: ${llmView.description}` : "",
+        llmView.cause ? `원인 추정: ${llmView.cause}` : "",
+        llmView.recommendation ? `권고 조치: ${llmView.recommendation}` : "",
+      ]
+        .filter((v) => v.trim().length > 0)
+        .join("\n")
+    : llmFallbackText;
+
+  const pdfReportData = useMemo<DBReport>(() => {
+    const timestamp =
+      caseData.timestamp instanceof Date
+        ? caseData.timestamp.toISOString()
+        : String(caseData.timestamp ?? "");
+
+    return {
+      id: caseData.id,
+      image_id: caseData.image_id ?? "",
+      category: caseData.product_group ?? "-",
+      timestamp,
+      defect_type: caseData.defect_type ?? "",
+      location: caseData.location ?? "",
+      affected_area_pct:
+        typeof caseData.affected_area_pct === "number" ? caseData.affected_area_pct : 0,
+      ad_score: typeof caseData.anomaly_score === "number" ? caseData.anomaly_score : 0,
+      confidence: typeof caseData.defect_confidence === "number" ? caseData.defect_confidence : 0,
+      decision: normalizeDecisionForPdf(caseData.decision),
+      // 상세 페이지에 보이는 LLM 요약 텍스트를 PDF에도 그대로 사용한다.
+      llm_analysis_summary: llmSummaryForPdf,
+      image_path: caseData.image_path ?? "",
+      heatmap_path: caseData.heatmap_path ?? "",
+      overlay_path: caseData.overlay_path ?? "",
+    };
+  }, [caseData, llmSummaryForPdf]);
+
+  const handleDownloadPdf = async () => {
+    if (!reportRef.current) return;
+    
+    setIsDownloading(true);
+    try {
+      const element = reportRef.current;
+      const canvas = await html2canvas(element, {
+        scale: 2,
+        useCORS: true, 
+        logging: false,
+        backgroundColor: "#ffffff",
+      });
+      
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF("p", "mm", "a4");
+      const pdfWidth = pdf.internal.pageSize.getWidth();
+      const pdfHeight = (canvas.height * pdfWidth) / canvas.width;
+
+      pdf.addImage(imgData, "PNG", 0, 0, pdfWidth, pdfHeight);
+      pdf.save(`Inspection_Report_${caseData.image_id || caseData.id}.pdf`);
+    } catch (error) {
+      console.error("PDF 생성 실패:", error);
+      alert("PDF 생성 중 오류가 발생했습니다.");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
 
   return (
     <div className="p-8 bg-white min-h-screen">
@@ -128,20 +208,17 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
         <span className="text-gray-900 font-medium">Case #{caseData.id}</span>
       </div>
 
-      {/* 상단 헤더 정보 */}
+      {/* 헤더 */}
       <div className="mb-8">
-        <h1 className="text-2xl font-semibold text-gray-900 mb-2">{caseData.id}</h1>
+        <h1 className="text-2xl font-semibold text-gray-900 mb-2">Case #{caseData.id}</h1>
         <p className="text-sm text-gray-500">
           {formattedDate} · {caseData.line_id}
         </p>
       </div>
 
       <div className="grid grid-cols-3 gap-8">
-        {/* 왼쪽 섹션 (이미지 + 근거 요약) */}
         <div className="col-span-2 space-y-6">
-          
-          {/* 1. 검사 이미지 박스 */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
+          <div className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-medium text-gray-900">검사 이미지</h2>
               <div className="flex items-center gap-2">
@@ -149,7 +226,7 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
                   <button
                     key={k}
                     onClick={() => setActiveTab(k)}
-                    className={`px-3 py-1.5 text-sm rounded ${
+                    className={`px-3 py-1.5 text-sm rounded transition-colors ${
                       activeTab === k ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-700 hover:bg-gray-200"
                     }`}
                   >
@@ -159,30 +236,26 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
               </div>
             </div>
             <ImagePanel caseData={caseData} active={activeTab} />
-            <div className="grid grid-cols-2 gap-4 text-sm">
-              <div>
-                <span className="text-gray-500">이미지 ID:</span>
-                <span className="ml-2 font-mono text-gray-900">{caseData.image_id}</span>
-              </div>
+            <div className="text-sm">
+              <span className="text-gray-500 font-medium">이미지 ID:</span>
+              <span className="ml-2 font-mono text-gray-900">{caseData.image_id}</span>
             </div>
           </div>
 
-          {/* 2. 근거 요약 박스 */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
+          <div className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
             <h2 className="text-lg font-medium text-gray-900 mb-6">근거 요약</h2>
-
             <div className="grid grid-cols-3 gap-6 mb-8">
               <div>
-                <label className="text-sm font-medium text-gray-500 uppercase block mb-2">결함 타입</label>
+                <label className="text-xs font-bold text-gray-400 uppercase block mb-1">결함 타입</label>
                 <p className="text-lg text-gray-900 font-semibold">{defectTypeLabel(caseData.defect_type)}</p>
               </div>
               <div>
-                <label className="text-sm font-medium text-gray-500 uppercase block mb-2">위치</label>
+                <label className="text-xs font-bold text-gray-400 uppercase block mb-1">위치</label>
                 <p className="text-lg text-gray-900 font-semibold">{locationLabel(caseData.location)}</p>
               </div>
               <div>
-                <label className="text-sm font-medium text-gray-500 uppercase block mb-2">영향 면적</label>
-                <p className="text-lg text-gray-900 font-semibold">{caseData.affected_area_pct.toFixed(1)}%</p>
+                <label className="text-xs font-bold text-gray-400 uppercase block mb-1">영향 면적</label>
+                <p className="text-lg text-gray-900 font-semibold">{caseData.affected_area_pct?.toFixed(1)}%</p>
               </div>
             </div>
 
@@ -191,7 +264,6 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
                 <Activity className={`w-4 h-4 ${!isLlmComplete ? 'animate-pulse' : ''}`} />
                 AI 분석 요약
               </label>
-              
               {isLlmComplete ? (
                 <div className="space-y-3 text-sm text-blue-900 leading-relaxed">
                   <p className="whitespace-pre-wrap">{llmView.summary}</p>
@@ -209,11 +281,7 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
                 <div className="flex items-center gap-3 py-2">
                   <Loader2 className={`w-4 h-4 text-blue-500 ${isLlmProcessing ? "animate-spin" : ""}`} />
                   <p className="text-sm text-blue-700 font-medium italic">
-                    {isLlmFailed
-                      ? `LLM 분석 실패${llmView.pipelineError ? `: ${llmView.pipelineError}` : ""}`
-                      : isLlmProcessing
-                        ? "LLM 분석 진행 중..."
-                        : "LLM 분석 결과가 아직 없습니다. (생성 실패 또는 미완료)"}
+                    {llmFallbackText}
                   </p>
                 </div>
               )}
@@ -221,11 +289,8 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
           </div>
         </div>
 
-        {/* 오른쪽 섹션 (자율 판정 + 내보내기) */}
         <div className="space-y-6">
-          
-          {/* 3. 자율 시스템 판정 및 타임라인 */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
+          <div className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-lg font-medium text-gray-900 flex items-center gap-2">
                 <ShieldCheck className="w-5 h-5 text-green-600" />
@@ -235,7 +300,6 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
                 {decisionLabel(caseData.decision)}
               </Badge>
             </div>
-
             <div className="space-y-6">
               <div className="bg-gray-50 rounded-lg p-4 border border-gray-100">
                 <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-4 flex items-center gap-2">
@@ -281,17 +345,24 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
             </div>
           </div>
 
-          {/* 4. 내보내기 박스 */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
+          <div className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
             <h2 className="text-lg font-medium text-gray-900 mb-4">내보내기</h2>
             <button
-              onClick={() => alert("리포트를 PDF 형식으로 내보냅니다.")}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors"
+              onClick={handleDownloadPdf}
+              disabled={isDownloading}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-blue-300"
             >
-              <Download className="w-4 h-4" />
-              <span>PDF 다운로드</span>
+              {isDownloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+              <span>{isDownloading ? "생성 중..." : "PDF 다운로드"}</span>
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* PDF용 숨겨진 영역 */}
+      <div style={{ position: 'absolute', top: '-10000px', left: '-10000px' }}>
+        <div ref={reportRef}>
+          <ReportTemplate reportData={pdfReportData} />
         </div>
       </div>
     </div>
