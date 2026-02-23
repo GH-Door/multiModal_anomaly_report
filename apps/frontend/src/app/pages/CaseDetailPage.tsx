@@ -9,12 +9,36 @@ import {
   Clock,
   Loader2
 } from "lucide-react";
-import type { AnomalyCase } from "../data/mockData";
+// import type { AnomalyCase } from "../data/mockData";  <- 삭제됨
 import { decisionLabel, defectTypeLabel, locationLabel } from "../utils/labels";
 import { getCaseImageUrl, type ImageVariant } from "../services/media";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import { ReportTemplate, type DBReport } from "../components/ReportTemplate";
+
+// 외부 파일 의존성을 없애기 위해 내부에 인터페이스 정의
+interface AnomalyCase {
+  id: string | number;
+  image_id?: string;
+  timestamp: string | Date;
+  line_id?: string;
+  product_group?: string;
+  defect_type: string;
+  location: string;
+  affected_area_pct?: number;
+  anomaly_score?: number;
+  defect_confidence?: number;
+  decision: "ok" | "ng" | "pending" | "anomaly" | "normal";
+  llm_summary?: string;
+  llm_analysis_summary?: string;
+  llm_structured_json?: any;
+  pipeline_status?: string;
+  pipeline_stage?: string;
+  pipeline_error?: string;
+  image_path?: string;
+  heatmap_path?: string;
+  overlay_path?: string;
+}
 
 interface CaseDetailPageProps {
   caseData: AnomalyCase;
@@ -30,7 +54,7 @@ function normalizeDecisionForPdf(decision?: string): DBReport["decision"] {
 }
 
 function ImagePanel({ caseData, active }: { caseData: AnomalyCase; active: ImageVariant }) {
-  const url = useMemo(() => getCaseImageUrl(caseData, active), [caseData, active]);
+  const url = useMemo(() => getCaseImageUrl(caseData as any, active), [caseData, active]);
 
   return (
     <div className="bg-gray-100 rounded-lg aspect-[4/3] overflow-hidden mb-4 flex items-center justify-center">
@@ -132,6 +156,7 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
     : isLlmProcessing
       ? "LLM 분석 진행 중..."
       : "LLM 분석 결과가 아직 없습니다. (생성 실패 또는 미완료)";
+  
   const llmSummaryForPdf = isLlmComplete
     ? [
         llmView.summary,
@@ -161,7 +186,6 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
       ad_score: typeof caseData.anomaly_score === "number" ? caseData.anomaly_score : 0,
       confidence: typeof caseData.defect_confidence === "number" ? caseData.defect_confidence : 0,
       decision: normalizeDecisionForPdf(caseData.decision),
-      // 상세 페이지에 보이는 LLM 요약 텍스트를 PDF에도 그대로 사용한다.
       llm_analysis_summary: llmSummaryForPdf,
       image_path: caseData.image_path ?? "",
       heatmap_path: caseData.heatmap_path ?? "",
@@ -183,21 +207,6 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
     );
   };
 
-  const renderReportCanvas = async (element: HTMLElement, hideImages: boolean) =>
-    html2canvas(element, {
-      scale: 2,
-      useCORS: true,
-      imageTimeout: 15000,
-      logging: false,
-      backgroundColor: "#ffffff",
-      onclone: (doc) => {
-        if (!hideImages) return;
-        doc.querySelectorAll("img").forEach((img) => {
-          (img as HTMLImageElement).style.visibility = "hidden";
-        });
-      },
-    });
-
   const handleDownloadPdf = async () => {
     if (!reportRef.current) return;
 
@@ -206,19 +215,26 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
       const element = reportRef.current;
       await waitForReportImages(element);
 
-      let imgData: string;
-      let fallbackWithoutImages = false;
+      const canvas = await html2canvas(element, {
+        scale: 2,
+        useCORS: true,
+        imageTimeout: 15000,
+        logging: false,
+        backgroundColor: "#ffffff",
+        removeContainer: true,
+        onclone: (clonedDoc) => {
+          const allElements = clonedDoc.getElementsByTagName("*");
+          for (let i = 0; i < allElements.length; i++) {
+            const el = allElements[i] as HTMLElement;
+            const style = window.getComputedStyle(el);
+            if (style.color?.includes("oklch")) el.style.color = "#111827";
+            if (style.backgroundColor?.includes("oklch")) el.style.backgroundColor = "#ffffff";
+            if (style.borderColor?.includes("oklch")) el.style.borderColor = "#e5e7eb";
+          }
+        }
+      });
 
-      try {
-        const canvas = await renderReportCanvas(element, false);
-        imgData = canvas.toDataURL("image/png");
-      } catch (captureError) {
-        console.warn("PDF 이미지 캡처 실패. 이미지 제외 fallback으로 재시도합니다.", captureError);
-        const canvas = await renderReportCanvas(element, true);
-        imgData = canvas.toDataURL("image/png");
-        fallbackWithoutImages = true;
-      }
-
+      const imgData = canvas.toDataURL("image/png");
       const pdf = new jsPDF("p", "mm", "a4");
       const pdfWidth = pdf.internal.pageSize.getWidth();
       const imgProps = pdf.getImageProperties(imgData);
@@ -226,13 +242,10 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
 
       pdf.addImage(imgData, "PNG", 0, 0, pdfWidth, pdfHeight);
       pdf.save(`Inspection_Report_${caseData.image_id || caseData.id}.pdf`);
-      if (fallbackWithoutImages) {
-        alert("이미지 접근 제한(CORS)으로 텍스트 중심 PDF로 저장되었습니다.");
-      }
+      
     } catch (error) {
       console.error("PDF 생성 실패:", error);
-      const message = error instanceof Error ? error.message : String(error ?? "");
-      alert(`PDF 생성 중 오류가 발생했습니다.${message ? `\n사유: ${message}` : ""}`);
+      alert("PDF 생성 중 오류가 발생했습니다.");
     } finally {
       setIsDownloading(false);
     }
@@ -240,7 +253,6 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
 
   return (
     <div className="p-8 bg-white min-h-screen">
-      {/* 네비게이션 */}
       <div className="flex items-center gap-2 text-sm text-gray-600 mb-6">
         <button onClick={onBackToOverview} className="hover:text-gray-900">개요</button>
         <ChevronRight className="w-4 h-4" />
@@ -249,7 +261,6 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
         <span className="text-gray-900 font-medium">Case #{caseData.id}</span>
       </div>
 
-      {/* 헤더 */}
       <div className="mb-8">
         <h1 className="text-2xl font-semibold text-gray-900 mb-2">Case #{caseData.id}</h1>
         <p className="text-sm text-gray-500">
@@ -400,8 +411,12 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
         </div>
       </div>
 
-      {/* PDF용 숨겨진 영역 */}
-      <div style={{ position: 'absolute', top: '-10000px', left: '-10000px' }}>
+      <div style={{ 
+        position: 'absolute', 
+        top: '-10000px', 
+        left: '-10000px',
+        all: 'initial' 
+      }}>
         <div ref={reportRef}>
           <ReportTemplate reportData={pdfReportData} />
         </div>
