@@ -9,6 +9,7 @@ import {
   Clock,
   Loader2
 } from "lucide-react";
+import type { AnomalyCase } from "../data/mockData";
 import { decisionLabel, defectTypeLabel, locationLabel } from "../utils/labels";
 import { getCaseImageUrl, type ImageVariant } from "../services/media";
 import jsPDF from "jspdf";
@@ -16,14 +17,20 @@ import html2canvas from "html2canvas";
 import { ReportTemplate, type DBReport } from "../components/ReportTemplate";
 
 interface CaseDetailPageProps {
-  caseData: DBReport; 
+  caseData: AnomalyCase;
   onBackToQueue: () => void;
   onBackToOverview: () => void;
 }
 
-function ImagePanel({ caseData, active }: { caseData: DBReport; active: ImageVariant }) {
-  // getCaseImageUrl 내부에서 타입 충돌 방지를 위해 as any 사용 (필요시)
-  const url = useMemo(() => getCaseImageUrl(caseData as any, active), [caseData, active]);
+function normalizeDecisionForPdf(decision?: string): DBReport["decision"] {
+  const d = String(decision ?? "").trim().toLowerCase();
+  if (d === "ng" || d === "anomaly") return "ng";
+  if (d === "ok" || d === "normal") return "ok";
+  return "pending";
+}
+
+function ImagePanel({ caseData, active }: { caseData: AnomalyCase; active: ImageVariant }) {
+  const url = useMemo(() => getCaseImageUrl(caseData, active), [caseData, active]);
 
   return (
     <div className="bg-gray-100 rounded-lg aspect-[4/3] overflow-hidden mb-4 flex items-center justify-center">
@@ -120,6 +127,47 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
     llmView.recommendation.length > 0;
   const isLlmProcessing = llmView.pipelineStatus === "processing";
   const isLlmFailed = llmView.pipelineStatus === "failed";
+  const llmFallbackText = isLlmFailed
+    ? `LLM 분석 실패${llmView.pipelineError ? `: ${llmView.pipelineError}` : ""}`
+    : isLlmProcessing
+      ? "LLM 분석 진행 중..."
+      : "LLM 분석 결과가 아직 없습니다. (생성 실패 또는 미완료)";
+  const llmSummaryForPdf = isLlmComplete
+    ? [
+        llmView.summary,
+        llmView.description ? `상세 분석: ${llmView.description}` : "",
+        llmView.cause ? `원인 추정: ${llmView.cause}` : "",
+        llmView.recommendation ? `권고 조치: ${llmView.recommendation}` : "",
+      ]
+        .filter((v) => v.trim().length > 0)
+        .join("\n")
+    : llmFallbackText;
+
+  const pdfReportData = useMemo<DBReport>(() => {
+    const timestamp =
+      caseData.timestamp instanceof Date
+        ? caseData.timestamp.toISOString()
+        : String(caseData.timestamp ?? "");
+
+    return {
+      id: caseData.id,
+      image_id: caseData.image_id ?? "",
+      category: caseData.product_group ?? "-",
+      timestamp,
+      defect_type: caseData.defect_type ?? "",
+      location: caseData.location ?? "",
+      affected_area_pct:
+        typeof caseData.affected_area_pct === "number" ? caseData.affected_area_pct : 0,
+      ad_score: typeof caseData.anomaly_score === "number" ? caseData.anomaly_score : 0,
+      confidence: typeof caseData.defect_confidence === "number" ? caseData.defect_confidence : 0,
+      decision: normalizeDecisionForPdf(caseData.decision),
+      // 상세 페이지에 보이는 LLM 요약 텍스트를 PDF에도 그대로 사용한다.
+      llm_analysis_summary: llmSummaryForPdf,
+      image_path: caseData.image_path ?? "",
+      heatmap_path: caseData.heatmap_path ?? "",
+      overlay_path: caseData.overlay_path ?? "",
+    };
+  }, [caseData, llmSummaryForPdf]);
 
   const handleDownloadPdf = async () => {
     if (!reportRef.current) return;
@@ -164,7 +212,7 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
       <div className="mb-8">
         <h1 className="text-2xl font-semibold text-gray-900 mb-2">Case #{caseData.id}</h1>
         <p className="text-sm text-gray-500">
-          {formattedDate} · {caseData.category}
+          {formattedDate} · {caseData.line_id}
         </p>
       </div>
 
@@ -233,11 +281,7 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
                 <div className="flex items-center gap-3 py-2">
                   <Loader2 className={`w-4 h-4 text-blue-500 ${isLlmProcessing ? "animate-spin" : ""}`} />
                   <p className="text-sm text-blue-700 font-medium italic">
-                    {isLlmFailed
-                      ? `LLM 분석 실패${llmView.pipelineError ? `: ${llmView.pipelineError}` : ""}`
-                      : isLlmProcessing
-                        ? "LLM 분석 진행 중..."
-                        : "LLM 분석 결과가 아직 없습니다. (생성 실패 또는 미완료)"}
+                    {llmFallbackText}
                   </p>
                 </div>
               )}
@@ -252,7 +296,7 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
                 <ShieldCheck className="w-5 h-5 text-green-600" />
                 자율 시스템 판정
               </h2>
-              <Badge variant={caseData.decision as any} className="text-sm px-3 py-1">
+              <Badge variant={caseData.decision} className="text-sm px-3 py-1">
                 {decisionLabel(caseData.decision)}
               </Badge>
             </div>
@@ -318,7 +362,7 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
       {/* PDF용 숨겨진 영역 */}
       <div style={{ position: 'absolute', top: '-10000px', left: '-10000px' }}>
         <div ref={reportRef}>
-          <ReportTemplate reportData={caseData} />
+          <ReportTemplate reportData={pdfReportData} />
         </div>
       </div>
     </div>

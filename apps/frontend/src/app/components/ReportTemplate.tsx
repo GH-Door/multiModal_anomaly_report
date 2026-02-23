@@ -4,7 +4,7 @@ import { defectTypeLabel, locationLabel } from "../utils/labels";
 import { getCaseImageUrl } from "../services/media";
 
 export interface DBReport {
-  id: number;
+  id: string | number;
   image_id: string;
   category: string;
   timestamp: string;
@@ -26,12 +26,19 @@ interface ReportTemplateProps {
 
 export const ReportTemplate = forwardRef<HTMLDivElement, ReportTemplateProps>(
   ({ reportData }, ref) => {
-    const formattedDate = new Date(reportData.timestamp).toLocaleString("ko-KR");
+    const rawDate = new Date(reportData.timestamp);
+    const formattedDate = isNaN(rawDate.getTime()) ? "-" : rawDate.toLocaleString("ko-KR");
     const originalUrl = getCaseImageUrl(reportData as any, "original");
     const heatmapUrl = getCaseImageUrl(reportData as any, "heatmap");
 
     // 판정 텍스트 및 스타일 결정
-    const isAnomaly = reportData.decision === "ng" || reportData.decision === "anomaly";
+    const decision = String(reportData.decision ?? "").trim().toLowerCase();
+    const isAnomaly = decision === "ng" || decision === "anomaly";
+    const adScoreText = Number.isFinite(reportData.ad_score) ? reportData.ad_score.toFixed(2) : "-";
+    const confidenceText = Number.isFinite(reportData.confidence)
+      ? `${Math.round(reportData.confidence * 100)}%`
+      : "-";
+    const llmSummaryText = String(reportData.llm_analysis_summary ?? "").trim() || "-";
 
     return (
       /* PDF 렌더링을 위한 컨테이너 - 화면 밖으로 숨겨두고 PDF 생성 시에만 참조함 */
@@ -57,7 +64,7 @@ export const ReportTemplate = forwardRef<HTMLDivElement, ReportTemplateProps>(
           </div>
           <div className="border-r border-blue-100 p-3 bg-blue-50">
             <p className="text-xs text-gray-500 mb-1">제품 카테고리</p>
-            <p className="font-bold">{reportData.category}</p>
+            <p className="font-bold">{reportData.category || "-"}</p>
           </div>
           <div className="p-3 bg-blue-50">
             <p className="text-xs text-gray-500 mb-1">검사 일시</p>
@@ -79,7 +86,7 @@ export const ReportTemplate = forwardRef<HTMLDivElement, ReportTemplateProps>(
               <div className="bg-gray-100 aspect-square rounded border border-gray-200 mb-2 flex items-center justify-center overflow-hidden">
                 {heatmapUrl ? <img src={heatmapUrl} crossOrigin="anonymous" className="w-full h-full object-contain" /> : "No Heatmap"}
               </div>
-              <p className="text-sm font-medium text-gray-600">이상 히트맵 (Score: {reportData.ad_score?.toFixed(2)})</p>
+              <p className="text-sm font-medium text-gray-600">이상 히트맵 (Score: {adScoreText})</p>
             </div>
           </div>
         </section>
@@ -117,12 +124,12 @@ export const ReportTemplate = forwardRef<HTMLDivElement, ReportTemplateProps>(
               <tr>
                 <td className="bg-gray-50 p-3 border border-gray-200 font-bold text-center">상세 설명</td>
                 <td className="p-3 border border-gray-200 leading-relaxed text-gray-700 min-h-[80px]">
-                  {reportData.llm_analysis_summary}
+                  {llmSummaryText}
                 </td>
               </tr>
               <tr>
                 <td className="bg-gray-50 p-3 border border-gray-200 font-bold text-center">신뢰도</td>
-                <td className="p-3 border border-gray-200">{(reportData.confidence * 100).toFixed(0)}%</td>
+                <td className="p-3 border border-gray-200">{confidenceText}</td>
               </tr>
             </tbody>
           </table>
