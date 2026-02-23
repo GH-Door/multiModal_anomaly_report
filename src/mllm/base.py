@@ -470,7 +470,7 @@ class BaseLLMClient(ABC):
             prompt_text = REPORT_PROMPT.format(category=category)
 
         questions = [{"type": "text", "text": prompt_text}]
-        return self.build_payload(image_path, few_shot_paths or [], questions)
+        return self.build_payload(image_path, few_shot_paths or [], questions, instruction="")
 
     def generate_report(
         self,
