@@ -60,7 +60,7 @@ function alertDescription(a: Alert) {
   if (a.type === "critical") {
     const line = a.line_id ?? "라인";
     const conf = typeof a.confidence === "number" ? `${Math.round(a.confidence * 100)}%` : "";
-    return `${line}에서 신뢰도 ${conf}의 ${defectTypeLabel(a.defect_type)}이 감지되었습니다. 즉시 확인 바랍니다.`;
+    return `${line}에서 ${defectTypeLabel(a.defect_type)}이(가) 감지되었습니다. 즉시 확인 바랍니다.`;
   }
 
   if (a.type === "consecutive") {

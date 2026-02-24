@@ -136,7 +136,6 @@ def run_ad_inference(cfg: ExperimentConfig, data_root: str, mmad_json: str) -> s
     # Build command
     cmd = [
         sys.executable, inference_script,
-        "--backend", "ckpt",
         "--checkpoint-dir", checkpoint_dir,
         "--data-root", data_root,
         "--mmad-json", mmad_json,

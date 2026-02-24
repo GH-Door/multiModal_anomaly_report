@@ -91,22 +91,6 @@ export function SettingsPage({
               </span>
             </label>
 
-            <label className="flex items-center gap-3">
-              <input
-                type="checkbox"
-                checked={notifications.reviewRequest}
-                onChange={(e) =>
-                  onNotificationsChange({
-                    ...notifications,
-                    reviewRequest: e.target.checked,
-                  })
-                }
-                className="w-4 h-4 text-blue-600 rounded"
-              />
-              <span className="text-sm text-gray-700">
-                재검토(Review) 요청 발생 시 알림
-              </span>
-            </label>
 
             {/* ✅ 추가: 연속 불량 감지 */}
             <label className="flex items-center gap-3">
