@@ -460,6 +460,67 @@ def _final_decision_from_llm(llm_response: dict[str, Any]) -> str:
     return "review_needed"
 
 
+def _strong_ad_llm_conflict(
+    *,
+    llm_flag: bool | None,
+    ad_decision: str,
+    ad_data: dict[str, Any],
+    policy: dict[str, Any],
+) -> bool:
+    """Return True when AD and LLM strongly disagree and needs manual review."""
+    if llm_flag is None:
+        return False
+
+    ad_decision_norm = str(ad_decision or "").strip().lower()
+    if ad_decision_norm not in {"anomaly", "normal"}:
+        return False
+
+    if (llm_flag and ad_decision_norm == "anomaly") or ((not llm_flag) and ad_decision_norm == "normal"):
+        return False
+
+    decision_conf = _safe_float(ad_data.get("decision_confidence"))
+    if decision_conf is None:
+        decision_conf = 0.0
+
+    basis = ad_data.get("decision_basis")
+    if not isinstance(basis, dict):
+        basis = {}
+    score_delta = abs(float(_safe_float(basis.get("score_delta")) or 0.0))
+
+    reliability = str(policy.get("reliability", "medium")).strip().lower()
+    min_conf = {"high": 0.80, "medium": 0.88, "low": 0.95}.get(reliability, 0.88)
+    min_delta = {"high": 0.08, "medium": 0.12, "low": 0.18}.get(reliability, 0.12)
+
+    return bool(decision_conf >= min_conf and score_delta >= min_delta)
+
+
+def _final_decision_with_guardrail(
+    *,
+    llm_response: dict[str, Any],
+    ad_decision: str,
+    ad_data: dict[str, Any],
+    policy: dict[str, Any],
+) -> str:
+    llm_flag = _to_bool_like(llm_response.get("is_anomaly_llm"))
+    base = _final_decision_from_llm(llm_response)
+    if base in {"anomaly", "normal"} and _strong_ad_llm_conflict(
+        llm_flag=llm_flag,
+        ad_decision=ad_decision,
+        ad_data=ad_data,
+        policy=policy,
+    ):
+        logger.info(
+            "AD/LLM strong conflict -> review_needed | ad_decision=%s llm_flag=%s decision_conf=%.4f score_delta=%.4f reliability=%s",
+            str(ad_decision or "").lower(),
+            llm_flag,
+            float(_safe_float(ad_data.get("decision_confidence")) or 0.0),
+            abs(float(_safe_float((ad_data.get("decision_basis") or {}).get("score_delta")) or 0.0)),
+            str(policy.get("reliability", "medium")).lower(),
+        )
+        return "review_needed"
+    return base
+
+
 def _has_llm_content(llm_response: dict[str, Any]) -> bool:
     summary = llm_response.get("llm_summary")
     report = llm_response.get("llm_report")
@@ -610,7 +671,12 @@ def _finalize_rag_llm_pipeline(
             )
             return
 
-        llm_decision = _final_decision_from_llm(llm_response)
+        llm_decision = _final_decision_with_guardrail(
+            llm_response=llm_response,
+            ad_decision=ad_decision,
+            ad_data=ad_result,
+            policy=policy,
+        )
         _safe_update_report(
             conn,
             report_id,

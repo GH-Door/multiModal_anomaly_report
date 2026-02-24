@@ -114,6 +114,8 @@ REPORT_PROMPT_WITH_AD = '''당신은 제조 품질관리 수석 검사관입니�
 충돌 처리 규칙:
 - AD 결과와 시각 근거가 충돌하면 시각 근거를 우선하세요.
 - 중요한 충돌인 경우 description에 그 사실을 한국어로 간단히 명시하세요.
+- AD 판정이 ANOMALY/NORMAL이고 decision_confidence가 0.90 이상이면, 정반대 판정을 내릴 때 confidence를 0.55 이하로 제한하세요.
+- 위와 같이 정반대 판정을 내릴 때는 description에 "AD와 충돌"의 시각적 반증 근거를 반드시 포함하세요.
 
 품질 규칙:
 - 눈으로 확인 가능한 구체적 결함 근거가 있을 때만 "is_anomaly"를 true로 설정하세요.
