@@ -5,82 +5,121 @@ from typing import Dict, List
 from .retriever import Retrievers
 
 # ── 외부 소스(PDF + Web) 검색 품질 테스트 쿼리 ─────────────────────────────────
-# PDF(PackagingGuide) 또는 CFIA_RetortPouch에서 검색되어야 하는 쿼리들
+# 실제 프로덕션 쿼리 형태: defect_type을 모르는 상태에서 카테고리 기반 generic 쿼리
 TEST_QUERIES_EXTERNAL: List[Dict] = [
     {
-        "query": "pouch seal void fold hermetic integrity food package",
+        "query": "pouch seal integrity failure food package",
         "relevant_datasets": ["PackagingGuide", "CFIA_RetortPouch"],
-        "description": "패키지 씰 보이드/폴드 결함",
+        "relevant_category": None,
+        "description": "패키지 씰 결함 (defect_type 미포함)",
     },
     {
-        "query": "bottle cap open loose not sealed drink",
+        "query": "drink bottle closure defect anomaly inspection",
         "relevant_datasets": ["PackagingGuide"],
-        "description": "음료 병 캡 미체결 결함",
+        "relevant_category": None,
+        "description": "음료 병 캡 결함 (defect_type 미포함)",
     },
     {
-        "query": "label mislabeled skewed misaligned food packaging",
+        "query": "food packaging label placement defect anomaly",
         "relevant_datasets": ["PackagingGuide"],
-        "description": "라벨 기울어짐/불일치 결함",
+        "relevant_category": None,
+        "description": "라벨 결함 (defect_type 미포함)",
     },
     {
-        "query": "contamination foreign material food package surface",
+        "query": "foreign material contamination food surface defect",
         "relevant_datasets": ["PackagingGuide", "CFIA_RetortPouch"],
-        "description": "이물질/오염 결함",
+        "relevant_category": None,
+        "description": "이물질/오염 결함 (defect_type 미포함)",
     },
     {
-        "query": "blister wrinkle delamination seal pouch serious defect",
+        "query": "retort pouch seal anomaly defect inspection",
         "relevant_datasets": ["CFIA_RetortPouch"],
-        "description": "CFIA 씰 블리스터/주름 결함",
+        "relevant_category": None,
+        "description": "CFIA 씰 결함 (defect_type 미포함)",
     },
     {
-        "query": "missing item wrong item assembly kitting box",
+        "query": "product assembly packaging component defect anomaly",
         "relevant_datasets": ["PackagingGuide"],
-        "description": "어셈블리 키팅 누락/오삽입 결함",
+        "relevant_category": None,
+        "description": "어셈블리 결함 (defect_type 미포함)",
     },
     {
-        "query": "swollen package bulging gas formation serious",
+        "query": "sealed package abnormal shape defect inspection",
         "relevant_datasets": ["CFIA_RetortPouch"],
-        "description": "CFIA 팽창 파우치 결함",
+        "relevant_category": None,
+        "description": "파우치 형상 이상 (defect_type 미포함)",
     },
     {
-        "query": "scratch crack cosmetic surface defect packaging",
+        "query": "product outer surface appearance defect anomaly",
         "relevant_datasets": ["PackagingGuide"],
-        "description": "외관 스크래치/크랙 결함",
+        "relevant_category": None,
+        "description": "외관 결함 (defect_type 미포함)",
     },
 ]
 
-# ── 기존 MMAD JSON 지식 회귀 테스트 쿼리 ────────────────────────────────────────
-# GoodsAD / MVTec-LOCO에서 검색되어야 하는 쿼리들
+# ── MMAD JSON 지식 회귀 테스트 쿼리 ─────────────────────────────────────────────
+# 프로덕션 형태 쿼리: build_generic_query(category) 와 동일한 패턴
+# defect_type을 쿼리에 포함하지 않음 → 실제 평가 조건과 일치
 TEST_QUERIES_MMAD: List[Dict] = [
     {
-        "query": "food package surface anomaly broken damaged",
+        "query": "food_package defect anomaly inspection",
         "relevant_datasets": ["GoodsAD"],
-        "description": "GoodsAD food_package 결함",
+        "relevant_category": "food_package",
+        "description": "GoodsAD food_package (generic query)",
     },
     {
-        "query": "drink bottle cap open half open seal broken",
+        "query": "drink_bottle defect anomaly inspection",
         "relevant_datasets": ["GoodsAD"],
-        "description": "GoodsAD drink_bottle 캡 결함",
+        "relevant_category": "drink_bottle",
+        "description": "GoodsAD drink_bottle (generic query)",
     },
     {
-        "query": "food box surface damage deformation crushed",
+        "query": "food_box defect anomaly inspection",
         "relevant_datasets": ["GoodsAD"],
-        "description": "GoodsAD food_box 변형/손상",
+        "relevant_category": "food_box",
+        "description": "GoodsAD food_box (generic query)",
     },
     {
-        "query": "juice bottle label anomaly structural defect",
-        "relevant_datasets": ["MVTec-LOCO"],
-        "description": "MVTec-LOCO juice_bottle 라벨 이상",
+        "query": "cigarette_box defect anomaly inspection",
+        "relevant_datasets": ["GoodsAD"],
+        "relevant_category": "cigarette_box",
+        "description": "GoodsAD cigarette_box (generic query)",
     },
     {
-        "query": "breakfast box wrong items missing logical anomaly",
-        "relevant_datasets": ["MVTec-LOCO"],
-        "description": "MVTec-LOCO breakfast_box 논리적 이상",
+        "query": "food_bottle defect anomaly inspection",
+        "relevant_datasets": ["GoodsAD"],
+        "relevant_category": "food_bottle",
+        "description": "GoodsAD food_bottle (generic query)",
     },
     {
-        "query": "pushpins missing extra structural anomaly arrangement",
+        "query": "drink_can defect anomaly inspection",
+        "relevant_datasets": ["GoodsAD"],
+        "relevant_category": "drink_can",
+        "description": "GoodsAD drink_can (generic query)",
+    },
+    {
+        "query": "juice_bottle defect anomaly inspection",
         "relevant_datasets": ["MVTec-LOCO"],
-        "description": "MVTec-LOCO pushpins 구조적 이상",
+        "relevant_category": "juice_bottle",
+        "description": "MVTec-LOCO juice_bottle (generic query)",
+    },
+    {
+        "query": "breakfast_box defect anomaly inspection",
+        "relevant_datasets": ["MVTec-LOCO"],
+        "relevant_category": "breakfast_box",
+        "description": "MVTec-LOCO breakfast_box (generic query)",
+    },
+    {
+        "query": "pushpins defect anomaly inspection",
+        "relevant_datasets": ["MVTec-LOCO"],
+        "relevant_category": "pushpins",
+        "description": "MVTec-LOCO pushpins (generic query)",
+    },
+    {
+        "query": "screw_bag defect anomaly inspection",
+        "relevant_datasets": ["MVTec-LOCO"],
+        "relevant_category": "screw_bag",
+        "description": "MVTec-LOCO screw_bag (generic query)",
     },
 ]
 
@@ -88,18 +127,22 @@ TEST_QUERIES_MMAD: List[Dict] = [
 class RAGEvaluator:
     """RAG 검색 품질 평가 — Hit Rate, MRR.
 
+    Hit 판정 우선순위:
+    1. ``relevant_category``가 있으면 category 수준으로 판정 (더 엄격)
+    2. 없으면 ``relevant_datasets`` 수준으로 판정 (느슨)
+
     Args:
         retriever: Retrievers 인스턴스.
 
     Example::
 
         ev = RAGEvaluator(Retrievers(vectorstore))
-        result = ev.evaluate(TEST_QUERIES_EXTERNAL, k=5)
+        result = ev.evaluate(TEST_QUERIES_MMAD, k=5)
         print(result["hit_rate"], result["mrr"])
 
         comparison = ev.compare(
             baseline=RAGEvaluator(Retrievers(baseline_vs)),
-            test_queries=TEST_QUERIES_EXTERNAL,
+            test_queries=TEST_QUERIES_MMAD,
         )
     """
 
@@ -110,7 +153,7 @@ class RAGEvaluator:
         """Hit Rate와 MRR을 계산해 반환.
 
         Args:
-            test_queries: ``[{"query", "relevant_datasets", "description"}, ...]``
+            test_queries: ``[{"query", "relevant_datasets", "relevant_category"(optional), "description"}, ...]``
             k: 쿼리당 검색할 최대 문서 수.
 
         Returns:
@@ -119,23 +162,39 @@ class RAGEvaluator:
         per_query = []
         for item in test_queries:
             docs = self.retriever.retrieve(item["query"], k=k)
-            retrieved_datasets = [d.metadata.get("dataset", "") for d in docs]
+            relevant_category = item.get("relevant_category")
 
-            hit = any(ds in item["relevant_datasets"] for ds in retrieved_datasets)
-
-            rr = 0.0
-            for rank, ds in enumerate(retrieved_datasets, 1):
-                if ds in item["relevant_datasets"]:
-                    rr = 1.0 / rank
-                    break
+            # category 수준 판정 (relevant_category 있을 때)
+            if relevant_category:
+                retrieved_categories = [d.metadata.get("category", "") for d in docs]
+                hit = any(cat == relevant_category for cat in retrieved_categories)
+                rr = 0.0
+                for rank, cat in enumerate(retrieved_categories, 1):
+                    if cat == relevant_category:
+                        rr = 1.0 / rank
+                        break
+                criterion = "category"
+            else:
+                # dataset 수준 판정 (fallback)
+                retrieved_datasets = [d.metadata.get("dataset", "") for d in docs]
+                hit = any(ds in item["relevant_datasets"] for ds in retrieved_datasets)
+                rr = 0.0
+                for rank, ds in enumerate(retrieved_datasets, 1):
+                    if ds in item["relevant_datasets"]:
+                        rr = 1.0 / rank
+                        break
+                criterion = "dataset"
 
             per_query.append({
                 "query": item["query"],
                 "description": item["description"],
                 "hit": hit,
                 "reciprocal_rank": rr,
-                "retrieved_datasets": retrieved_datasets,
+                "criterion": criterion,
+                "retrieved_categories": [d.metadata.get("category", "") for d in docs],
+                "retrieved_datasets": [d.metadata.get("dataset", "") for d in docs],
                 "relevant_datasets": item["relevant_datasets"],
+                "relevant_category": relevant_category,
             })
 
         n = len(per_query)
