@@ -45,19 +45,18 @@ class GeminiClient(BaseLLMClient):
         self._model = None
 
     def _load_model(self):
-        """Lazy load Gemini model."""
+        """Lazy load Gemini client (google-genai SDK)."""
         if self._model is not None:
             return
 
         try:
-            import google.generativeai as genai
+            from google import genai as google_genai
         except ImportError:
             raise ImportError(
-                "Please install google-generativeai: pip install google-generativeai"
+                "Please install google-genai: pip install google-genai"
             )
 
-        genai.configure(api_key=self.api_key)
-        self._model = genai.GenerativeModel(model_name=self.model_name)
+        self._model = google_genai.Client(api_key=self.api_key)
 
     def send_request(self, payload: dict) -> Optional[dict]:
         """Send request to Gemini API with retry logic."""
@@ -69,8 +68,10 @@ class GeminiClient(BaseLLMClient):
         while retries < self.max_retries:
             try:
                 before = time.time()
-                response = self._model.generate_content(payload)
-                response.resolve()
+                response = self._model.models.generate_content(
+                    model=self.model_name,
+                    contents=payload["parts"],
+                )
                 self.api_time_cost += time.time() - before
                 return {"text": response.text}
 
