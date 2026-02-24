@@ -1,6 +1,6 @@
 // src/app/App.tsx
 import React, { useMemo, useState, useEffect } from "react";
-import { AlertOctagon } from "lucide-react"; // 팝업용 아이콘 추가
+import { AlertOctagon } from "lucide-react";
 
 import { Sidebar } from "./components/Sidebar";
 import { FilterBar, FilterState } from "./components/FilterBar";
@@ -20,6 +20,7 @@ import { getDateRangeWindow } from "./utils/dateUtils";
 
 import { useReportCases } from "./hooks/useReportCases";
 import { useLocalStorageState } from "./hooks/useLocalStorageState";
+import { useUrlPageState } from "./hooks/useUrlPageState";
 
 const MODEL_VERSION: Record<string, string> = {
   PatchCore: "v2.3.1",
@@ -49,45 +50,14 @@ const NOTIFICATION_STORAGE_OPTIONS = {
   normalize: (v: NotificationSettings) => ({ ...DEFAULT_NOTI, ...(v ?? {}) }),
 };
 
-// URL query 기반 최소 라우팅 타입
-type Page = "overview" | "queue" | "report" | "settings" | "detail";
-
-// URL에서 page/case 읽기
-function readRoute(): { page: Page; caseId: string | null } {
-  const params = new URLSearchParams(window.location.search);
-  const page = (params.get("page") ?? "overview") as Page;
-  const caseId = params.get("case");
-  // detail인데 case가 없으면 보정
-  if (page === "detail" && !caseId) return { page: "overview", caseId: null };
-  return { page, caseId };
-}
-
-// URL에 page/case 쓰기 (push/replace)
-function writeRoute(
-  page: Page,
-  caseId: string | null,
-  mode: "push" | "replace" = "push",
-) {
-  const url = new URL(window.location.href);
-  url.searchParams.set("page", page);
-  if (caseId) url.searchParams.set("case", caseId);
-  else url.searchParams.delete("case");
-
-  const state = { page, caseId };
-  if (mode === "replace") window.history.replaceState(state, "", url);
-  else window.history.pushState(state, "", url);
-}
+const API_KEY_STORAGE_OPTIONS = {
+  serialize: (v: string) => v || "",
+  deserialize: (raw: string) => raw || "",
+};
 
 export default function App() {
-  // 초기값은 URL에서 읽어서 설정
-  const initial = readRoute();
+  const { currentPage, selectedCaseId, navigate, openCase } = useUrlPageState();
 
-  const [currentPage, setCurrentPage] = useState<Page>(initial.page);
-  const [selectedCaseId, setSelectedCaseId] = useState<string | null>(
-    initial.caseId,
-  );
-
-  // 팝업 알림 관련 상태
   const [showToast, setShowToast] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
   const [lastNgCount, setLastNgCount] = useState(0);
@@ -107,22 +77,15 @@ export default function App() {
       NOTIFICATION_STORAGE_OPTIONS,
     );
 
-  // 백엔드 데이터 연동 훅
+  const [apiKey, setApiKey] = useLocalStorageState<string>(
+    "apiKey",
+    "",
+    API_KEY_STORAGE_OPTIONS
+  );
+
   const { cases: backendCases, loading, error, refetch } =
     useReportCases(REPORT_CASES_OPTIONS);
 
-  // 브라우저 뒤로/앞으로(popstate) => URL 기준으로 state 복원
-  useEffect(() => {
-    const onPop = () => {
-      const { page, caseId } = readRoute();
-      setCurrentPage(page);
-      setSelectedCaseId(caseId);
-    };
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
-  }, []);
-
-  // 1. 실시간 폴링 (5초마다 백엔드 데이터 갱신)
   useEffect(() => {
     const interval = setInterval(() => {
       refetch();
@@ -130,7 +93,6 @@ export default function App() {
     return () => clearInterval(interval);
   }, [refetch]);
 
-  // 백엔드에서 실제 LLM 모델 목록/활성 모델 동기화
   useEffect(() => {
     const ac = new AbortController();
     void (async () => {
@@ -150,7 +112,6 @@ export default function App() {
 
   const cases: AnomalyCase[] = backendCases;
 
-  // 2. 신규 결함 감지 및 토스트 팝업 트리거
   useEffect(() => {
     const currentNgCount = cases.filter((c) => c.decision === "NG").length;
 
@@ -160,7 +121,6 @@ export default function App() {
       return;
     }
 
-    // 이전에 기록된 개수가 있고, 현재 NG 개수가 더 늘어났다면 신규 발생으로 간주
     if (lastNgCount > 0 && currentNgCount > lastNgCount) {
       setShowToast(true);
       setIsExiting(false);
@@ -176,7 +136,6 @@ export default function App() {
     setLastNgCount(currentNgCount);
   }, [cases, lastNgCount, notificationSettings.highSeverity]);
 
-  // 3. 실시간 알림창 리스트 (우측 사이드바용)
   const alerts: Alert[] = useMemo(() => {
     const out: Alert[] = [];
     const ngCases = [...cases]
@@ -299,21 +258,6 @@ export default function App() {
     });
   }, [casesWithSettings, filters]);
 
-  // 내비게이션 시 URL도 같이 갱신
-  const handleNavigate = (page: string) => {
-    const p = page as Page;
-    setCurrentPage(p);
-    setSelectedCaseId(null);
-    writeRoute(p, null, "push");
-  };
-
-  // 케이스 클릭 시 detail + case 파라미터 반영
-  const handleCaseClick = (caseId: string) => {
-    setSelectedCaseId(caseId);
-    setCurrentPage("detail");
-    writeRoute("detail", caseId, "push");
-  };
-
   const handleModelChange = (nextModel: string) => {
     if (!nextModel) return;
     setModelSyncing(true);
@@ -373,9 +317,8 @@ export default function App() {
       return (
         <CaseDetailPage
           caseData={currentCase}
-          // detail 내부 back도 URL 동기화되게 handleNavigate 사용
-          onBackToQueue={() => handleNavigate("queue")}
-          onBackToOverview={() => handleNavigate("overview")}
+          onBackToQueue={() => navigate("queue")}
+          onBackToOverview={() => navigate("overview")}
         />
       );
     }
@@ -390,7 +333,7 @@ export default function App() {
           />
         );
       case "queue":
-        return <AnomalyQueuePage cases={filteredCases} onCaseClick={handleCaseClick} />;
+        return <AnomalyQueuePage cases={filteredCases} onCaseClick={openCase} />;
       case "report":
         return <ReportBuilderPage cases={filteredCases} />;
       case "settings":
@@ -402,6 +345,8 @@ export default function App() {
             modelSyncing={modelSyncing}
             notifications={notificationSettings}
             onNotificationsChange={setNotificationSettings}
+            apiKey={apiKey}
+            onApiKeyChange={setApiKey}
           />
         );
       default:
@@ -417,7 +362,6 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-gray-50 relative">
-      {/* 팝업(Toast) 알림 UI */}
       {showToast && (
         <div
           className={`fixed top-6 right-6 z-[9999] ${
@@ -446,7 +390,7 @@ export default function App() {
         </div>
       )}
 
-      <Sidebar currentPage={currentPage} onNavigate={handleNavigate} />
+      <Sidebar currentPage={currentPage} onNavigate={(page) => navigate(page as any)} />
 
       <div className="flex-1 flex flex-col overflow-hidden">
         {(currentPage === "overview" ||

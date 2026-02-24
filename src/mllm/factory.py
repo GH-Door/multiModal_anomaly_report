@@ -93,8 +93,17 @@ MODEL_REGISTRY = {
 
 
 def list_llm_models() -> list[str]:
-    """Return sorted list of available model names."""
-    return sorted(MODEL_REGISTRY.keys())
+    """Return only selected models for the frontend dropdown."""
+    # 프론트엔드 드롭다운에 노출하고 싶은 '키값'들만 적습니다.
+    DISPLAY_MODELS = [
+        "gemma3-12b-int4",
+        "gemma3-27b-int4",
+        "gemini-2.5-flash-lite"
+    ]
+    
+    # 설정한 모델들만 필터링
+    available = [m for m in DISPLAY_MODELS if m in MODEL_REGISTRY]
+    return sorted(available)
 
 
 def get_llm_client(model_name: str, model_path: str = None, **kwargs) -> BaseLLMClient:
