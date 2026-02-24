@@ -111,7 +111,6 @@ def _enforce_report_by_ad_decision(
     *,
     ad_decision: str,
     region: Any,
-    defect_type_hint: str | None,
 ) -> Dict[str, Any]:
     """Outside [t_low, t_high], force LLM output to follow AD decision."""
     d = _norm_decision(ad_decision)
@@ -126,13 +125,7 @@ def _enforce_report_by_ad_decision(
     if isinstance(llm_report, dict):
         report = dict(llm_report)
         if forced_is_anomaly:
-            raw_anomaly_type = str(report.get("anomaly_type") or "").strip().lower().replace(" ", "_")
-            if not defect_type_hint:
-                report["anomaly_type"] = "other"
-            elif _is_none_like(raw_anomaly_type):
-                report["anomaly_type"] = defect_type_hint
-            elif defect_type_hint not in raw_anomaly_type and raw_anomaly_type not in defect_type_hint:
-                # If model text and hint conflict, keep a safe generic type.
+            if _is_none_like(report.get("anomaly_type")):
                 report["anomaly_type"] = "other"
             if _is_none_like(report.get("severity")):
                 report["severity"] = "medium"
@@ -286,7 +279,6 @@ class LlmService:
             result,
             ad_decision=ad_decision_raw,
             region=ad_data.get("region"),
-            defect_type_hint=defect_type_hint,
         )
 
         llm_report = result.get("llm_report")
