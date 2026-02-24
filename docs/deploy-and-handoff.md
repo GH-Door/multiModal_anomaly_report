@@ -62,13 +62,7 @@ ENV
 npm run dev -- --host 0.0.0.0 --port 5173
 ```
 
-## 6) Optional dashboard
-```bash
-source .venv/bin/activate
-streamlit run apps/dashboard/app.py --server.port 8501
-```
-
-## 7) Teammate handoff (legacy-based updates later)
+## 6) Teammate handoff (legacy-based updates later)
 - Keep `legacy/` as reference only (already gitignored).
 - Teammates debug on their side, then copy only changed source files into canonical paths:
   - frontend -> `apps/frontend`
