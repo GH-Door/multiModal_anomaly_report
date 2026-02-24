@@ -511,7 +511,19 @@ def _final_decision_with_guardrail(
 ) -> str:
     llm_flag = _to_bool_like(llm_response.get("is_anomaly_llm"))
     base = _final_decision_from_llm(llm_response)
-    if base in {"anomaly", "normal"} and _strong_ad_llm_conflict(
+    ad_decision_norm = str(ad_decision or "").strip().lower()
+
+    # Hard fail-safe: do not finalize as normal when AD says anomaly.
+    if base == "normal" and ad_decision_norm == "anomaly":
+        logger.info(
+            "AD anomaly vs LLM normal -> review_needed (hard guard) | decision_conf=%.4f score_delta=%.4f reliability=%s",
+            float(_safe_float(ad_data.get("decision_confidence")) or 0.0),
+            abs(float(_safe_float((ad_data.get("decision_basis") or {}).get("score_delta")) or 0.0)),
+            str(policy.get("reliability", "medium")).lower(),
+        )
+        return "review_needed"
+
+    if base == "normal" and _strong_ad_llm_conflict(
         llm_flag=llm_flag,
         ad_decision=ad_decision,
         ad_data=ad_data,
@@ -540,12 +552,17 @@ def _annotate_review_needed_response(
     llm_flag = _to_bool_like(llm_response.get("is_anomaly_llm"))
     if llm_flag is not False:
         return llm_response
-    if not _strong_ad_llm_conflict(
-        llm_flag=llm_flag,
-        ad_decision=ad_decision,
-        ad_data=ad_data,
-        policy=policy,
-    ):
+    ad_decision_norm = str(ad_decision or "").strip().lower()
+    conflict_guard = (
+        ad_decision_norm == "anomaly"
+        or _strong_ad_llm_conflict(
+            llm_flag=llm_flag,
+            ad_decision=ad_decision,
+            ad_data=ad_data,
+            policy=policy,
+        )
+    )
+    if not conflict_guard:
         return llm_response
 
     out = dict(llm_response)

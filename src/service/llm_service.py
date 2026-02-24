@@ -76,7 +76,8 @@ def _is_strong_ad_llm_conflict(
     if llm_flag is None:
         return False
     if ad_decision_norm == "anomaly" and llm_flag is False:
-        return _strong_ad_signal(ad_data, policy, ad_decision_norm)
+        # For report quality, never trust domain-rag normal blindly over AD anomaly.
+        return True
     if ad_decision_norm == "normal" and llm_flag is True:
         return _strong_ad_signal(ad_data, policy, ad_decision_norm)
     return False
@@ -113,7 +114,7 @@ def _apply_consistency_guard(
         return out
 
     ad_decision_norm = str(ad_decision or "").strip().lower()
-    strong = _strong_ad_signal(ad_data, policy, ad_decision_norm)
+    strong = (ad_decision_norm == "anomaly" and llm_flag is False) or _strong_ad_signal(ad_data, policy, ad_decision_norm)
     if not strong:
         return out
 
