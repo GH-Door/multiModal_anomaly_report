@@ -6,7 +6,8 @@ FROM pytorch/pytorch:2.5.1-cuda12.1-cudnn8-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_SYSTEM_PYTHON=1
 
 # OpenCV, git 등 시스템 의존성
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -16,18 +17,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # uv 설치
 RUN pip install --no-cache-dir uv
 
-# torchao: Gemma3 INT4 모델(pytorch/gemma-3-*-INT4) 로드에 필요
-RUN uv pip install --system --no-cache torchao
-
 WORKDIR /app
 
 # 의존성 파일 먼저 복사 → 소스 변경 시 레이어 캐시 재사용
 COPY pyproject.toml uv.lock ./
-COPY src/ src/
 
-# pyproject.toml 기반 설치
-# --no-build-isolation: 이미 설치된 torch(베이스 이미지)를 재사용
-RUN uv pip install --system --no-cache -e . --no-build-isolation
+# uv sync: uv.lock 기준으로 정확한 버전 설치 (재현 가능한 빌드)
+# UV_SYSTEM_PYTHON=1 → .venv 없이 시스템 Python에 직접 설치
+# ⚠️ pyproject.toml 패키지 추가/변경 시 로컬에서 `uv lock` 실행 후 커밋 필요
+RUN uv sync --frozen
 
 # 소스 전체 복사
 COPY . .
