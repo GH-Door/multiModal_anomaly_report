@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict
 
@@ -72,11 +73,45 @@ def _is_none_like(value: Any) -> bool:
     return s in {"", "-", "none", "없음", "해당 없음", "n/a"}
 
 
+def _extract_defect_type_hint(ad_data: Dict[str, Any]) -> str | None:
+    for key in ("defect_type", "predicted_defect_type", "gt_defect_type"):
+        value = ad_data.get(key)
+        if isinstance(value, str):
+            v = value.strip().lower().replace(" ", "_")
+            if v and v not in {"none", "normal", "good", "review_needed", "anomaly"}:
+                return v
+
+    reason_codes = ad_data.get("reason_codes")
+    if isinstance(reason_codes, str):
+        v = reason_codes.strip().lower().replace(" ", "_")
+        if v and v not in {"none", "normal", "good"}:
+            return v
+    if isinstance(reason_codes, (list, tuple)):
+        for code in reason_codes:
+            if isinstance(code, str):
+                v = code.strip().lower().replace(" ", "_")
+                if v and v not in {"none", "normal", "good"}:
+                    return v
+
+    source_path = str(ad_data.get("ingest_source_path") or "").strip()
+    if not source_path:
+        return None
+    stem = Path(source_path).stem.lower()
+    tokens = [t for t in re.split(r"[^a-z0-9]+", stem) if t]
+    filtered = [t for t in tokens if t not in {"good", "normal", "defect", "anomaly", "image", "img", "line", "incoming", "surface"} and not t.isdigit()]
+    if not filtered:
+        return None
+    if len(filtered) >= 2:
+        return f"{filtered[0]}_{filtered[1]}"
+    return filtered[0]
+
+
 def _enforce_report_by_ad_decision(
     result: Dict[str, Any],
     *,
     ad_decision: str,
     region: Any,
+    defect_type_hint: str | None,
 ) -> Dict[str, Any]:
     """Outside [t_low, t_high], force LLM output to follow AD decision."""
     d = _norm_decision(ad_decision)
@@ -91,7 +126,13 @@ def _enforce_report_by_ad_decision(
     if isinstance(llm_report, dict):
         report = dict(llm_report)
         if forced_is_anomaly:
-            if _is_none_like(report.get("anomaly_type")):
+            raw_anomaly_type = str(report.get("anomaly_type") or "").strip().lower().replace(" ", "_")
+            if not defect_type_hint:
+                report["anomaly_type"] = "other"
+            elif _is_none_like(raw_anomaly_type):
+                report["anomaly_type"] = defect_type_hint
+            elif defect_type_hint not in raw_anomaly_type and raw_anomaly_type not in defect_type_hint:
+                # If model text and hint conflict, keep a safe generic type.
                 report["anomaly_type"] = "other"
             if _is_none_like(report.get("severity")):
                 report["severity"] = "medium"
@@ -142,6 +183,7 @@ class LlmService:
         policy: Dict[str, Any],
     ) -> Dict[str, Any]:
         ad_decision_raw = _norm_decision(str(ad_data.get("ad_decision", "review_needed")))
+        defect_type_hint = _extract_defect_type_hint(ad_data)
 
         few_shot_paths: list[str] = []
         if ref_path:
@@ -163,6 +205,7 @@ class LlmService:
             "is_anomaly": ad_decision_raw == "anomaly",
             "decision_confidence": decision_confidence,
             "reason_codes": ad_data.get("reason_codes"),
+            "defect_type_hint": defect_type_hint,
             "defect_location": {
                 "has_defect": ad_data.get("has_defect"),
                 "region": ad_data.get("region"),
@@ -243,6 +286,7 @@ class LlmService:
             result,
             ad_decision=ad_decision_raw,
             region=ad_data.get("region"),
+            defect_type_hint=defect_type_hint,
         )
 
         llm_report = result.get("llm_report")

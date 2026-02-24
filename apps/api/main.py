@@ -935,6 +935,7 @@ def _run_inspection_pipeline(
     ad_result["review_needed"] = review_needed
     ad_result["decision_confidence"] = decision_meta.get("decision_confidence")
     ad_result["decision_basis"] = basis
+    ad_result["ingest_source_path"] = ingest_source_path
 
     initial_data = {
         "dataset": dataset,
