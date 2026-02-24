@@ -405,18 +405,52 @@ def has_ingest_source_path(conn: psycopg2.extensions.connection, source_path: st
 
 def get_category_policy(conn: psycopg2.extensions.connection, category: str) -> Dict[str, Any]:
     """Load per-category threshold policy with defaults."""
-    sql = "SELECT t_low, t_high FROM category_metadata WHERE category = %s"
+    sql = """
+    SELECT
+      t_low, t_high, review_band, reliability,
+      ad_weight, location_mode, min_location_confidence, use_bbox
+    FROM category_metadata
+    WHERE category = %s
+    """
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, (category,))
             row = cur.fetchone()
         if row:
             policy = dict(row)
-            return {
+            out: Dict[str, Any] = {
                 "t_low": float(policy.get("t_low", DEFAULT_POLICY["t_low"])),
                 "t_high": float(policy.get("t_high", DEFAULT_POLICY["t_high"])),
                 "source": "category_metadata",
             }
+            review_band = policy.get("review_band")
+            if review_band is not None:
+                try:
+                    out["review_band"] = float(review_band)
+                except (TypeError, ValueError):
+                    pass
+            reliability = policy.get("reliability")
+            if isinstance(reliability, str) and reliability.strip():
+                out["reliability"] = reliability.strip().lower()
+            ad_weight = policy.get("ad_weight")
+            if ad_weight is not None:
+                try:
+                    out["ad_weight"] = float(ad_weight)
+                except (TypeError, ValueError):
+                    pass
+            location_mode = policy.get("location_mode")
+            if isinstance(location_mode, str) and location_mode.strip():
+                out["location_mode"] = location_mode.strip().lower()
+            min_location_conf = policy.get("min_location_confidence")
+            if min_location_conf is not None:
+                try:
+                    out["min_location_confidence"] = float(min_location_conf)
+                except (TypeError, ValueError):
+                    pass
+            use_bbox = policy.get("use_bbox")
+            if isinstance(use_bbox, bool):
+                out["use_bbox"] = use_bbox
+            return out
     except Exception as exc:
         logger.warning("Failed to load category policy for %s: %s", category, exc)
     return {

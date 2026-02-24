@@ -174,6 +174,10 @@ def _sync_category_metadata_from_policy_doc(conn, doc: dict[str, Any], *, defaul
             "t_high": policy.get("t_high"),
             "review_band": policy.get("review_band"),
             "reliability": policy.get("reliability"),
+            "ad_weight": policy.get("ad_weight"),
+            "location_mode": policy.get("location_mode"),
+            "min_location_confidence": policy.get("min_location_confidence"),
+            "use_bbox": policy.get("use_bbox"),
         }
         rows.append(row)
 
@@ -243,6 +247,26 @@ def _resolve_class_policy_from_json(doc: dict[str, Any], class_key: str) -> dict
     if reliability not in {"high", "medium", "low"}:
         reliability = "medium"
 
+    ad_weight = _safe_float(merged.get("ad_weight"))
+    if ad_weight is None:
+        ad_weight = {"high": 0.70, "medium": 0.45, "low": 0.20}.get(reliability, 0.45)
+    ad_weight = _clip(float(ad_weight), 0.0, 1.0)
+
+    location_mode = str(merged.get("location_mode", "normal")).lower()
+    if location_mode not in {"off", "normal", "strict"}:
+        location_mode = "normal"
+
+    min_location_confidence = _safe_float(merged.get("min_location_confidence"))
+    if min_location_confidence is None:
+        min_location_confidence = {"high": 0.25, "medium": 0.35, "low": 0.45}.get(reliability, 0.35)
+    min_location_confidence = _clip(float(min_location_confidence), 0.0, 1.0)
+
+    use_bbox_raw = merged.get("use_bbox")
+    if isinstance(use_bbox_raw, bool):
+        use_bbox = use_bbox_raw
+    else:
+        use_bbox = location_mode != "off"
+
     review_band = _safe_float(merged.get("review_band"))
     legacy_center = _safe_float(merged.get("decision_center"))
     t_low = _safe_float(merged.get("t_low"))
@@ -263,6 +287,10 @@ def _resolve_class_policy_from_json(doc: dict[str, Any], class_key: str) -> dict
         "class_key": class_key,
         "source": source,
         "reliability": reliability,
+        "ad_weight": ad_weight,
+        "location_mode": location_mode,
+        "min_location_confidence": min_location_confidence,
+        "use_bbox": use_bbox,
         "review_band": review_band,
         "legacy_center": legacy_center,
     }
@@ -274,6 +302,30 @@ def _resolve_class_policy_from_json(doc: dict[str, Any], class_key: str) -> dict
 
 
 def _resolve_class_policy_from_bounds(raw: dict[str, Any], class_key: str) -> dict[str, Any]:
+    reliability = str(raw.get("reliability", "medium")).lower()
+    if reliability not in {"high", "medium", "low"}:
+        reliability = "medium"
+
+    ad_weight = _safe_float(raw.get("ad_weight"))
+    if ad_weight is None:
+        ad_weight = {"high": 0.70, "medium": 0.45, "low": 0.20}.get(reliability, 0.45)
+    ad_weight = _clip(float(ad_weight), 0.0, 1.0)
+
+    location_mode = str(raw.get("location_mode", "normal")).lower()
+    if location_mode not in {"off", "normal", "strict"}:
+        location_mode = "normal"
+
+    min_location_confidence = _safe_float(raw.get("min_location_confidence"))
+    if min_location_confidence is None:
+        min_location_confidence = {"high": 0.25, "medium": 0.35, "low": 0.45}.get(reliability, 0.35)
+    min_location_confidence = _clip(float(min_location_confidence), 0.0, 1.0)
+
+    use_bbox_raw = raw.get("use_bbox")
+    if isinstance(use_bbox_raw, bool):
+        use_bbox = use_bbox_raw
+    else:
+        use_bbox = location_mode != "off"
+
     t_low = _safe_float(raw.get("t_low"))
     t_high = _safe_float(raw.get("t_high"))
     if t_low is not None and t_high is not None and t_low > t_high:
@@ -291,7 +343,11 @@ def _resolve_class_policy_from_bounds(raw: dict[str, Any], class_key: str) -> di
     return {
         "class_key": class_key,
         "source": str(raw.get("source", "default")),
-        "reliability": "medium",
+        "reliability": reliability,
+        "ad_weight": ad_weight,
+        "location_mode": location_mode,
+        "min_location_confidence": min_location_confidence,
+        "use_bbox": use_bbox,
         "review_band": _clip((t_high - t_low) / 2.0, 0.02, 0.30),
         "legacy_center": (t_low + t_high) / 2.0,
         "t_low": float(t_low),
@@ -335,47 +391,62 @@ def _decide_with_policy(
     model_threshold: float,
     class_calibration: dict[str, Any] | None = None,
 ) -> tuple[str, bool, dict[str, Any]]:
-    calibration = class_calibration or {}
-    center = _safe_float(calibration.get("center_threshold"))
-    if center is None:
+    _ = class_calibration  # Kept for API compatibility; decision now uses explicit t_low/t_high only.
+
+    t_low = _safe_float(class_policy.get("t_low"))
+    t_high = _safe_float(class_policy.get("t_high"))
+    if t_low is None or t_high is None:
         center = _safe_float(class_policy.get("legacy_center"))
-    if center is None:
-        center = float(model_threshold)
-    center = _clip(float(center), 0.0, 1.0)
+        if center is None:
+            center = float(model_threshold)
+        center = _clip(float(center), 0.0, 1.0)
+        review_band = _safe_float(class_policy.get("review_band"))
+        if review_band is None:
+            review_band = 0.08
+        band = _clip(float(review_band), 0.02, 0.35)
+        t_low = _clip(center - band, 0.0, 1.0)
+        t_high = _clip(center + band, 0.0, 1.0)
+    else:
+        t_low = _clip(float(t_low), 0.0, 1.0)
+        t_high = _clip(float(t_high), 0.0, 1.0)
+        if t_low > t_high:
+            t_low, t_high = t_high, t_low
+        center = _clip((t_low + t_high) / 2.0, 0.0, 1.0)
+        band = _clip((t_high - t_low) / 2.0, 0.02, 0.35)
 
-    base_band = _safe_float(class_policy.get("review_band"))
-    if base_band is None:
-        base_band = 0.08
-    calib_band = _safe_float(calibration.get("review_band"))
-    if calib_band is not None:
-        base_band = max(float(base_band), float(calib_band))
-
-    reliability = str(class_policy.get("reliability", "medium")).lower()
-    reliability_scale = {"high": 0.9, "medium": 1.0, "low": 1.3}.get(reliability, 1.0)
-    uncertainty_band = _clip(float(base_band) * reliability_scale, 0.02, 0.35)
-
-    score_delta = float(anomaly_score) - center
-    if score_delta > uncertainty_band:
+    score = float(anomaly_score)
+    score_delta = score - center
+    if score >= t_high:
         decision = "anomaly"
         review_needed = False
-    elif score_delta < -uncertainty_band:
+    elif score <= t_low:
         decision = "normal"
         review_needed = False
     else:
         decision = "review_needed"
         review_needed = True
 
-    decision_confidence = round(
-        _clip(abs(score_delta) / max(1e-6, uncertainty_band * 2.5), 0.0, 1.0),
-        4,
-    )
+    if review_needed:
+        # Confidence is lower near the center of [t_low, t_high], higher near boundaries.
+        half_band = max(1e-6, (t_high - t_low) / 2.0)
+        near_boundary = min(score - t_low, t_high - score)
+        decision_confidence = round(_clip(near_boundary / half_band, 0.0, 1.0), 4)
+    elif decision == "anomaly":
+        denom = max(1e-6, 1.0 - t_high)
+        decision_confidence = round(_clip((score - t_high) / denom, 0.0, 1.0), 4)
+    else:
+        denom = max(1e-6, t_low)
+        decision_confidence = round(_clip((t_low - score) / denom, 0.0, 1.0), 4)
+
     return decision, review_needed, {
         "decision_confidence": decision_confidence,
         "basis": {
             "center_threshold": round(center, 4),
-            "uncertainty_band": round(float(uncertainty_band), 4),
+            "uncertainty_band": round(float(band), 4),
             "score_delta": round(float(score_delta), 4),
-            "used_calibration": bool(calibration),
+            "used_calibration": False,
+            "t_low": round(float(t_low), 4),
+            "t_high": round(float(t_high), 4),
         },
     }
 
@@ -402,6 +473,23 @@ def _final_decision_from_llm(llm_response: dict[str, Any]) -> str:
     if llm_flag is False:
         return "normal"
     return "review_needed"
+
+
+def _final_decision_with_guardrail(
+    *,
+    llm_response: dict[str, Any],
+    ad_decision: str,
+    ad_data: dict[str, Any],
+    policy: dict[str, Any],
+) -> str:
+    _ = ad_data
+    _ = policy
+    ad_decision_norm = str(ad_decision or "").strip().lower()
+    # Outside [t_low, t_high] -> follow AD decision.
+    if ad_decision_norm in {"anomaly", "normal"}:
+        return ad_decision_norm
+    # Inside [t_low, t_high] (review_needed) -> let LLM decide.
+    return _final_decision_from_llm(llm_response)
 
 
 def _has_llm_content(llm_response: dict[str, Any]) -> bool:
@@ -538,7 +626,7 @@ def _finalize_rag_llm_pipeline(
                 ad_result["original_path"],
                 ref_path,
                 model_category,
-                {**ad_result, "ad_decision": ad_decision},
+                ad_result,
                 policy,
             )
         finally:
@@ -554,7 +642,12 @@ def _finalize_rag_llm_pipeline(
             )
             return
 
-        llm_decision = _final_decision_from_llm(llm_response)
+        llm_decision = _final_decision_with_guardrail(
+            llm_response=llm_response,
+            ad_decision=ad_decision,
+            ad_data=ad_result,
+            policy=policy,
+        )
         _safe_update_report(
             conn,
             report_id,
@@ -798,10 +891,20 @@ def _run_inspection_pipeline(
         class_calibration=calibration,
     )
     basis = decision_meta.get("basis", {})
-    center = _clip(float(_safe_float(basis.get("center_threshold")) or model_thr), 0.0, 1.0)
-    band = _clip(float(_safe_float(basis.get("uncertainty_band")) or policy.get("review_band", 0.08)), 0.02, 0.35)
-    t_low = _clip(center - band, 0.0, 1.0)
-    t_high = _clip(center + band, 0.0, 1.0)
+    basis_t_low = _safe_float(basis.get("t_low"))
+    basis_t_high = _safe_float(basis.get("t_high"))
+    if basis_t_low is not None and basis_t_high is not None:
+        t_low = _clip(float(basis_t_low), 0.0, 1.0)
+        t_high = _clip(float(basis_t_high), 0.0, 1.0)
+        if t_low > t_high:
+            t_low, t_high = t_high, t_low
+        center = _clip((t_low + t_high) / 2.0, 0.0, 1.0)
+        band = max(1e-6, (t_high - t_low) / 2.0)
+    else:
+        center = _clip(float(_safe_float(basis.get("center_threshold")) or model_thr), 0.0, 1.0)
+        band = _clip(float(_safe_float(basis.get("uncertainty_band")) or policy.get("review_band", 0.08)), 0.0, 0.35)
+        t_low = _clip(center - band, 0.0, 1.0)
+        t_high = _clip(center + band, 0.0, 1.0)
     applied_policy = {
         "class_key": str(policy.get("class_key", model_category)),
         "source": policy_source,
@@ -828,6 +931,11 @@ def _run_inspection_pipeline(
         review_needed,
         ad_decision,
     )
+    ad_result["ad_decision"] = ad_decision
+    ad_result["review_needed"] = review_needed
+    ad_result["decision_confidence"] = decision_meta.get("decision_confidence")
+    ad_result["decision_basis"] = basis
+    ad_result["ingest_source_path"] = ingest_source_path
 
     initial_data = {
         "dataset": dataset,

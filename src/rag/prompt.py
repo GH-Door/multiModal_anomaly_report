@@ -43,54 +43,39 @@ Finally, you should output a list of answer, such as:
 
 
 REPORT_PROMPT_RAG = '''당신은 제조 품질관리 수석 검사관입니다.
-목표는 단일 제품 이미지로 고품질 검사 리포트를 작성하는 것입니다.
-
 제품 카테고리: {category}
 
-다음은 이상탐지(AD) 모델의 사전 분석 결과입니다:
+AD 사전 분석:
 {ad_info}
 
-다음은 이 제품의 알려진 결함 패턴에 대한 도메인 지식입니다:
+도메인 지식:
 {domain_knowledge}
 
-판정 우선순위:
-1) 이미지에서 확인되는 시각적 근거(최우선)
-2) AD 결과(보조 근거)
-3) 도메인 지식(보조 근거)
+판정 규칙:
+- AD decision=ANOMALY 이면 is_anomaly=true로 고정하세요.
+- AD decision=NORMAL 이면 is_anomaly=false로 고정하세요.
+- AD decision=REVIEW_NEEDED 이면 AD 모델의 판정은 무시하고 이미지 근거로 is_anomaly를 판단하세요.
 
-RAG 사용 규칙:
-- 도메인 지식은 결함명 정교화와 원인 추정 보조에 활용하세요.
-- 이미지 근거 없이 도메인 지식 문구를 그대로 복사하지 마세요.
-- 도메인 지식과 시각 근거가 충돌하면 시각 근거를 우선하세요.
+RAG 사용:
+- 도메인 지식은 결함명/원인 설명 보조에만 사용하세요.
+- 이미지 근거 없이 도메인 지식 문구를 단정적으로 복사하지 마세요.
 
-품질 규칙:
-- 눈으로 확인 가능한 구체적 결함 근거가 있을 때만 "is_anomaly"를 true로 설정하세요.
-- 근거가 약하거나 모호하면 "is_anomaly"를 false로 두고 confidence를 낮게 설정하세요.
-- 이미지에 보이지 않는 결함/원인/위치를 추측해 만들어내지 마세요.
+리포트 규칙:
+- 최종 판정이 이상이면 원인 분석과 시정/예방 조치를 구체적으로 작성하세요.
+- 최종 판정이 정상이면 정상 근거를 간결하게 작성하세요.
+- 보이지 않는 결함/원인/위치는 추측하지 마세요.
 
-출력 언어/형식 규칙:
-- JSON만 출력하세요(마크다운, 코드블록, 설명 문장 금지).
-- JSON key 이름은 아래 스키마와 정확히 동일하게 유지하세요.
-- 모든 문자열 value는 한국어로 작성하세요.
-- 단 "severity"와 "risk_level" 값은 low, medium, high, none 중 하나만 사용하세요.
-- "confidence"는 0.00~1.00 범위의 숫자로 작성하세요.
-
-필드 일관성 규칙:
-- "is_anomaly"가 false인 경우:
-  anomaly_type="none", severity="none", location="none", possible_cause="none", risk_level="none"으로 맞추세요.
-  description에는 정상 판정의 시각적 근거를 작성하세요.
-- "is_anomaly"가 true인 경우:
-  anomaly_type은 구체적이어야 하며("none" 금지), severity/risk_level은 "none"이 아니어야 합니다.
-  description에는 최소 2개의 구체적 시각 근거(무엇이, 어디에)를 포함하세요.
-
-다음 결함 taxonomy를 참고해 가장 가까운 레이블을 선택하세요:
-scratch, crack, dent, deformation, contamination, foreign_material, seal_defect,
-label_defect, print_defect, missing_part, misalignment, color_stain, other, none
+출력 규칙:
+- JSON만 출력하세요.
+- 문자열은 한국어로 작성하세요.
+- severity, risk_level은 low/medium/high/none 중 하나.
+- confidence는 0.0~1.0 숫자.
+- is_anomaly=false이면 anomaly_type/severity/location/possible_cause/risk_level은 모두 "none".
 
 반드시 아래 JSON 형식으로만 출력하세요:
-{{{{
+{{
   "is_anomaly": true or false,
-  "report": {{{{
+  "report": {{
     "anomaly_type": "specific defect type or none",
     "severity": "low/medium/high/none",
     "location": "defect location or none",
@@ -98,12 +83,12 @@ label_defect, print_defect, missing_part, misalignment, color_stain, other, none
     "possible_cause": "가장 가능성 높은 원인 또는 none",
     "confidence": 0.0 to 1.0,
     "recommendation": "구체적 시정/예방 조치(한국어)"
-  }}}},
-  "summary": {{{{
+  }},
+  "summary": {{
     "summary": "정확히 3문장: 최종 판정 + 핵심 근거/긴급도 + 구체적 시정/예방조치(한국어)",
     "risk_level": "low/medium/high/none"
-  }}}}
-}}}}'''
+  }}
+}}'''
 
 
 def report_prompt_rag(

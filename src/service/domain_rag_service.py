@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,58 @@ class DomainKnowledgeRagService:
         return (dataset or None), (category or raw)
 
     @staticmethod
+    def _extract_defect_type_hint(category: str, ad_data: dict[str, Any] | None) -> str | None:
+        data = ad_data or {}
+
+        for key in ("defect_type", "predicted_defect_type", "gt_defect_type"):
+            value = data.get(key)
+            if isinstance(value, str):
+                v = value.strip().lower().replace(" ", "_")
+                if v and v not in {"none", "normal", "good", "review_needed", "anomaly"}:
+                    return v
+
+        reason_codes = data.get("reason_codes")
+        if isinstance(reason_codes, str):
+            v = reason_codes.strip().lower().replace(" ", "_")
+            if v and v not in {"none", "normal", "good"}:
+                return v
+        if isinstance(reason_codes, (list, tuple)):
+            for code in reason_codes:
+                if isinstance(code, str):
+                    v = code.strip().lower().replace(" ", "_")
+                    if v and v not in {"none", "normal", "good"}:
+                        return v
+
+        source_path = str(data.get("ingest_source_path") or "").strip()
+        if not source_path:
+            return None
+
+        stem = Path(source_path).stem.lower()
+        tokens = [t for t in re.split(r"[^a-z0-9]+", stem) if t]
+        if not tokens:
+            return None
+
+        stop = {
+            "good",
+            "normal",
+            "defect",
+            "anomaly",
+            "image",
+            "img",
+            "line",
+            "incoming",
+            "surface",
+        }
+        category_tokens = {t for t in re.split(r"[^a-z0-9]+", category.lower()) if t}
+        filtered = [t for t in tokens if t not in stop and t not in category_tokens and not t.isdigit()]
+        if not filtered:
+            return None
+
+        if len(filtered) >= 2:
+            return f"{filtered[0]}_{filtered[1]}"
+        return filtered[0]
+
+    @staticmethod
     def _build_query(category: str, ad_data: dict[str, Any] | None) -> str:
         if not category:
             return "defect anomaly inspection"
@@ -89,6 +142,12 @@ class DomainKnowledgeRagService:
         ad_decision = str((ad_data or {}).get("ad_decision", "")).lower()
         if ad_decision == "normal":
             return f"{category} normal product appearance"
+        if ad_decision == "anomaly":
+            decision_conf = 0.0
+            try:
+                decision_conf = float((ad_data or {}).get("decision_confidence") or 0.0)
+            except (TypeError, ValueError):
+                decision_conf = 0.0
 
         region = (ad_data or {}).get("region")
         area_ratio = (ad_data or {}).get("area_ratio")
@@ -99,6 +158,8 @@ class DomainKnowledgeRagService:
             extra.append(f"area_ratio {area_ratio}")
 
         suffix = f" {' '.join(extra)}" if extra else ""
+        if ad_decision == "anomaly" and decision_conf >= 0.8:
+            return f"{category} defect failure case root cause inspection{suffix}"
         return f"{category} defect anomaly inspection{suffix}"
 
     def build_report_instruction(
@@ -112,20 +173,39 @@ class DomainKnowledgeRagService:
         if not self.ready:
             return None
 
+        ad_decision = str((ad_data or {}).get("ad_decision", "")).strip().lower()
+        if ad_decision == "review_needed":
+            # Uncertain AD decisions are common near class boundaries.
+            # Skipping domain RAG here avoids injecting defect-biased priors on likely-normal images.
+            logger.info(
+                "Skip domain knowledge RAG for review_needed | model_category=%s",
+                model_category,
+            )
+            return None
+
         dataset, category = self._split_model_category(model_category)
         if not category:
             return None
 
         query = self._build_query(category, ad_data)
+        defect_type_hint = self._extract_defect_type_hint(category, ad_data)
 
         try:
             docs = self._retriever.retrieve(  # type: ignore[union-attr]
                 query,
                 dataset=dataset,
                 category=category,
-                defect_type=None,
+                defect_type=defect_type_hint,
                 k=self.top_k,
             )
+            if not docs and defect_type_hint:
+                docs = self._retriever.retrieve(  # type: ignore[union-attr]
+                    query,
+                    dataset=dataset,
+                    category=category,
+                    defect_type=None,
+                    k=self.top_k,
+                )
             if not docs and dataset:
                 docs = self._retriever.retrieve(  # type: ignore[union-attr]
                     query,
@@ -136,10 +216,11 @@ class DomainKnowledgeRagService:
                 )
             context = self._retriever.format_context(docs)  # type: ignore[union-attr]
             logger.info(
-                "Domain knowledge RAG retrieved %d docs | dataset=%s | category=%s",
+                "Domain knowledge RAG retrieved %d docs | dataset=%s | category=%s | defect_type_hint=%s",
                 len(docs),
                 dataset or "*",
                 category,
+                defect_type_hint or "-",
             )
             return self._report_prompt_rag(  # type: ignore[misc]
                 category=category,
