@@ -48,7 +48,6 @@ class LlmService:
         ad_data: Dict[str, Any],
         policy: Dict[str, Any],
     ) -> Dict[str, Any]:
-        del policy  # reserved for future prompt control
         ad_decision_raw = str(ad_data.get("ad_decision", "review_needed"))
         few_shot_paths: list[str] = []
         if ref_path:
@@ -58,11 +57,18 @@ class LlmService:
             else:
                 logger.warning("Skipping unavailable RAG reference image for LLM: %s", ref_path)
 
+        decision_confidence = ad_data.get("decision_confidence")
+        if decision_confidence is None:
+            # Backward compatibility: some payloads used a scalar confidence field.
+            fallback_confidence = ad_data.get("confidence")
+            if isinstance(fallback_confidence, (int, float, str)):
+                decision_confidence = fallback_confidence
+
         ad_info = {
             "anomaly_score": ad_data.get("ad_score", 0.0),
             "decision": ad_decision_raw.lower(),
             "is_anomaly": ad_decision_raw.lower() == "anomaly",
-            "decision_confidence": ad_data.get("confidence"),
+            "decision_confidence": decision_confidence,
             "reason_codes": ad_data.get("reason_codes"),
             "defect_location": {
                 "has_defect": ad_data.get("has_defect"),
@@ -70,6 +76,42 @@ class LlmService:
                 "area_ratio": ad_data.get("area_ratio"),
             },
         }
+        confidence_raw = ad_data.get("confidence")
+        if isinstance(confidence_raw, dict):
+            ad_info["confidence"] = confidence_raw
+        else:
+            try:
+                if confidence_raw is not None:
+                    ad_info["location_confidence"] = float(confidence_raw)
+            except (TypeError, ValueError):
+                pass
+
+        policy_info: Dict[str, Any] = {}
+        if isinstance(policy, dict):
+            for key in (
+                "reliability",
+                "ad_weight",
+                "review_band",
+                "t_low",
+                "t_high",
+                "location_mode",
+                "min_location_confidence",
+                "use_bbox",
+            ):
+                value = policy.get(key)
+                if value is not None:
+                    policy_info[key] = value
+        if policy_info:
+            ad_info["policy"] = policy_info
+            if "confidence" not in ad_info and isinstance(policy_info.get("reliability"), str):
+                ad_info["confidence"] = {"reliability": str(policy_info["reliability"]).strip().lower()}
+
+        if isinstance(ad_data.get("report_guidance"), dict):
+            ad_info["report_guidance"] = ad_data["report_guidance"]
+        if isinstance(ad_data.get("decision_basis"), dict):
+            ad_info["decision_basis"] = ad_data["decision_basis"]
+        if "review_needed" in ad_data:
+            ad_info["review_needed"] = bool(ad_data.get("review_needed"))
         ad_info_text = format_ad_info(ad_info)
 
         report_instruction: str | None = None

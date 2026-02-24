@@ -111,6 +111,16 @@ class DomainKnowledgeRagService:
         if not self.ready:
             return None
 
+        ad_decision = str((ad_data or {}).get("ad_decision", "")).strip().lower()
+        if ad_decision == "review_needed":
+            # Uncertain AD decisions are common near class boundaries.
+            # Skipping domain RAG here avoids injecting defect-biased priors on likely-normal images.
+            logger.info(
+                "Skip domain knowledge RAG for review_needed | model_category=%s",
+                model_category,
+            )
+            return None
+
         dataset, category = self._split_model_category(model_category)
         if not category:
             return None

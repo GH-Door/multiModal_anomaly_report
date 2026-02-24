@@ -118,15 +118,13 @@ export function CaseDetailPage({ caseData, onBackToQueue, onBackToOverview }: Ca
 
   // PDF용 데이터 정제 (빈 줄 제거 및 Trim)
   const cleanSummary = useMemo(() => {
-    const raw = isLlmComplete
-      ? [llmView.summary, llmView.description, llmView.cause, llmView.recommendation]
-          .map(s => s?.trim())
-          .filter(Boolean)
-          .join("\n\n")
-      : "분석 기록 대기 중";
-    
-    return raw.split('\n').map(line => line.trim()).filter(line => line.length > 0).join('\n');
-  }, [llmView, isLlmComplete]);
+    if (!isLlmComplete) return "분석 기록 대기 중";
+    return llmView.summary
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0)
+      .join('\n');
+  }, [llmView.summary, isLlmComplete]);
 
   // PDF 전달용 데이터 객체
   const pdfReportData = useMemo<DBReport>(() => ({

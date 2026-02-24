@@ -174,6 +174,10 @@ def _sync_category_metadata_from_policy_doc(conn, doc: dict[str, Any], *, defaul
             "t_high": policy.get("t_high"),
             "review_band": policy.get("review_band"),
             "reliability": policy.get("reliability"),
+            "ad_weight": policy.get("ad_weight"),
+            "location_mode": policy.get("location_mode"),
+            "min_location_confidence": policy.get("min_location_confidence"),
+            "use_bbox": policy.get("use_bbox"),
         }
         rows.append(row)
 
@@ -243,6 +247,26 @@ def _resolve_class_policy_from_json(doc: dict[str, Any], class_key: str) -> dict
     if reliability not in {"high", "medium", "low"}:
         reliability = "medium"
 
+    ad_weight = _safe_float(merged.get("ad_weight"))
+    if ad_weight is None:
+        ad_weight = {"high": 0.70, "medium": 0.45, "low": 0.20}.get(reliability, 0.45)
+    ad_weight = _clip(float(ad_weight), 0.0, 1.0)
+
+    location_mode = str(merged.get("location_mode", "normal")).lower()
+    if location_mode not in {"off", "normal", "strict"}:
+        location_mode = "normal"
+
+    min_location_confidence = _safe_float(merged.get("min_location_confidence"))
+    if min_location_confidence is None:
+        min_location_confidence = {"high": 0.25, "medium": 0.35, "low": 0.45}.get(reliability, 0.35)
+    min_location_confidence = _clip(float(min_location_confidence), 0.0, 1.0)
+
+    use_bbox_raw = merged.get("use_bbox")
+    if isinstance(use_bbox_raw, bool):
+        use_bbox = use_bbox_raw
+    else:
+        use_bbox = location_mode != "off"
+
     review_band = _safe_float(merged.get("review_band"))
     legacy_center = _safe_float(merged.get("decision_center"))
     t_low = _safe_float(merged.get("t_low"))
@@ -263,6 +287,10 @@ def _resolve_class_policy_from_json(doc: dict[str, Any], class_key: str) -> dict
         "class_key": class_key,
         "source": source,
         "reliability": reliability,
+        "ad_weight": ad_weight,
+        "location_mode": location_mode,
+        "min_location_confidence": min_location_confidence,
+        "use_bbox": use_bbox,
         "review_band": review_band,
         "legacy_center": legacy_center,
     }
@@ -274,6 +302,30 @@ def _resolve_class_policy_from_json(doc: dict[str, Any], class_key: str) -> dict
 
 
 def _resolve_class_policy_from_bounds(raw: dict[str, Any], class_key: str) -> dict[str, Any]:
+    reliability = str(raw.get("reliability", "medium")).lower()
+    if reliability not in {"high", "medium", "low"}:
+        reliability = "medium"
+
+    ad_weight = _safe_float(raw.get("ad_weight"))
+    if ad_weight is None:
+        ad_weight = {"high": 0.70, "medium": 0.45, "low": 0.20}.get(reliability, 0.45)
+    ad_weight = _clip(float(ad_weight), 0.0, 1.0)
+
+    location_mode = str(raw.get("location_mode", "normal")).lower()
+    if location_mode not in {"off", "normal", "strict"}:
+        location_mode = "normal"
+
+    min_location_confidence = _safe_float(raw.get("min_location_confidence"))
+    if min_location_confidence is None:
+        min_location_confidence = {"high": 0.25, "medium": 0.35, "low": 0.45}.get(reliability, 0.35)
+    min_location_confidence = _clip(float(min_location_confidence), 0.0, 1.0)
+
+    use_bbox_raw = raw.get("use_bbox")
+    if isinstance(use_bbox_raw, bool):
+        use_bbox = use_bbox_raw
+    else:
+        use_bbox = location_mode != "off"
+
     t_low = _safe_float(raw.get("t_low"))
     t_high = _safe_float(raw.get("t_high"))
     if t_low is not None and t_high is not None and t_low > t_high:
@@ -291,7 +343,11 @@ def _resolve_class_policy_from_bounds(raw: dict[str, Any], class_key: str) -> di
     return {
         "class_key": class_key,
         "source": str(raw.get("source", "default")),
-        "reliability": "medium",
+        "reliability": reliability,
+        "ad_weight": ad_weight,
+        "location_mode": location_mode,
+        "min_location_confidence": min_location_confidence,
+        "use_bbox": use_bbox,
         "review_band": _clip((t_high - t_low) / 2.0, 0.02, 0.30),
         "legacy_center": (t_low + t_high) / 2.0,
         "t_low": float(t_low),
@@ -538,7 +594,7 @@ def _finalize_rag_llm_pipeline(
                 ad_result["original_path"],
                 ref_path,
                 model_category,
-                {**ad_result, "ad_decision": ad_decision},
+                ad_result,
                 policy,
             )
         finally:
@@ -828,6 +884,10 @@ def _run_inspection_pipeline(
         review_needed,
         ad_decision,
     )
+    ad_result["ad_decision"] = ad_decision
+    ad_result["review_needed"] = review_needed
+    ad_result["decision_confidence"] = decision_meta.get("decision_confidence")
+    ad_result["decision_basis"] = basis
 
     initial_data = {
         "dataset": dataset,

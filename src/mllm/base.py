@@ -184,6 +184,24 @@ def _normalize_decision(value: Any) -> bool:
     return s in ("true", "1", "yes", "anomaly", "이상", "불량", "defect", "bad", "abnormal")
 
 
+def _limit_to_n_sentences(text: str, max_sentences: int = 3) -> str:
+    """Limit free-form text to the first N sentence-like chunks."""
+    if not isinstance(text, str):
+        return ""
+    cleaned = text.strip()
+    if not cleaned or max_sentences <= 0:
+        return ""
+
+    # Split by sentence-ending punctuation or line breaks.
+    chunks = re.split(r"(?<=[.!?。])\s+|\n+", cleaned)
+    chunks = [c.strip() for c in chunks if c and c.strip()]
+    if not chunks:
+        return cleaned
+    if len(chunks) <= max_sentences:
+        return " ".join(chunks)
+    return " ".join(chunks[:max_sentences]).strip()
+
+
 def format_ad_info(ad_info: dict) -> str:
     """Format AD model output as a concise natural language summary.
 
@@ -210,49 +228,100 @@ def format_ad_info(ad_info: dict) -> str:
     decision = str(ad_info.get("decision", "")).strip().lower()
     is_anomaly = ad_info.get("is_anomaly")
 
+    decision_basis = ad_info.get("decision_basis", {})
+    if not isinstance(decision_basis, dict):
+        decision_basis = {}
+    center = _to_float(decision_basis.get("center_threshold"))
+    band = _to_float(decision_basis.get("uncertainty_band"))
+
     if decision in {"anomaly", "normal", "review_needed"}:
         decision_label = decision.upper()
-        if score is not None:
-            lines.append(f"- AD decision: {decision_label} (score: {score:.2f})")
+        score_part = f"{score:.2f}" if score is not None else "N/A"
+        if center is not None and band is not None:
+            lines.append(
+                f"- AD 판정: {decision_label} (score={score_part}, 임계값±band: {center:.3f}±{band:.3f})"
+            )
         else:
-            lines.append(f"- AD decision: {decision_label}")
+            lines.append(f"- AD 판정: {decision_label} (score={score_part})")
     elif score is not None:
         status = "ANOMALOUS" if is_anomaly else "NORMAL"
-        lines.append(f"- AD result: {status} (score: {score:.2f})")
+        lines.append(f"- AD 판정: {status} (score={score:.2f})")
 
     decision_conf = _to_float(ad_info.get("decision_confidence"))
-    if decision_conf is not None:
-        lines.append(f"- Decision confidence: {decision_conf:.2f} (0-1)")
+    review_needed = bool(ad_info.get("review_needed")) or decision == "review_needed"
 
     confidence = ad_info.get("confidence", {})
-    if isinstance(confidence, dict):
-        reliability = str(confidence.get("reliability", "")).strip().lower()
-        if reliability:
-            lines.append(f"- AD reliability for this class: {reliability}")
+    if not isinstance(confidence, dict):
+        confidence = {}
+
+    policy = ad_info.get("policy", {})
+    if not isinstance(policy, dict):
+        policy = {}
 
     guidance = ad_info.get("report_guidance", {})
-    if isinstance(guidance, dict):
-        use_for_decision = guidance.get("use_ad_for_anomaly_judgement")
-        use_for_location = guidance.get("use_ad_for_location")
-        if use_for_decision:
-            lines.append(f"- Use AD for anomaly judgement: {use_for_decision}")
-        if use_for_location:
-            lines.append(f"- Use AD for location hints: {use_for_location}")
+    if not isinstance(guidance, dict):
+        guidance = {}
+
+    trust_level = str(guidance.get("use_ad_for_anomaly_judgement", "")).strip().lower()
+    if trust_level not in {"high", "medium", "low", "none"}:
+        trust_level = str(policy.get("reliability", "")).strip().lower()
+    if trust_level not in {"high", "medium", "low", "none"}:
+        trust_level = str(confidence.get("reliability", "")).strip().lower()
+    if trust_level not in {"high", "medium", "low", "none"}:
+        trust_level = "medium"
+
+    ad_weight = _to_float(guidance.get("ad_weight"))
+    if ad_weight is None:
+        ad_weight = _to_float(policy.get("ad_weight"))
+
+    if review_needed:
+        trust_text = "시각 근거 우선, AD는 약하게 반영"
+    elif trust_level == "high":
+        trust_text = "이상 여부 판단에 강하게 반영"
+    elif trust_level == "medium":
+        trust_text = "보조 근거로 반영"
+    elif trust_level == "low":
+        trust_text = "참고 수준으로 반영"
+    else:
+        trust_text = "이상 여부 판단에는 반영하지 않음"
+
+    trust_line = f"- AD 신뢰도: {trust_level} → {trust_text}"
+    if ad_weight is not None:
+        trust_line += f" (weight={ad_weight:.2f})"
+    if decision_conf is not None:
+        trust_line += f", decision_confidence={decision_conf:.2f}"
+    lines.append(trust_line)
+
+    loc = ad_info.get("defect_location", {})
+    if not isinstance(loc, dict):
+        loc = {}
+    location_conf = _to_float(guidance.get("location_confidence"))
+    if location_conf is None:
+        location_conf = _to_float(ad_info.get("location_confidence"))
+    location_level = str(guidance.get("use_ad_for_location", "")).strip().lower()
+    if location_level not in {"high", "medium", "low", "none"}:
+        if location_conf is None:
+            location_level = "unknown"
+        elif location_conf >= 0.75:
+            location_level = "high"
+        elif location_conf >= 0.45:
+            location_level = "medium"
+        else:
+            location_level = "low"
+
+    if loc.get("has_defect"):
+        region = str(loc.get("region", "unknown")).strip() or "unknown"
+        area = _to_float(loc.get("area_ratio"))
+        area_text = f"{area * 100:.1f}%" if area is not None and area > 0 else "unknown"
+        loc_line = f"- 결함 위치 힌트: {region} (면적 {area_text}, 위치 신뢰도 {location_level})"
+        lines.append(loc_line)
+    elif loc:
+        lines.append("- 결함 위치 힌트: 신뢰 가능한 위치 정보 없음")
 
     reason_codes = ad_info.get("reason_codes")
     if isinstance(reason_codes, list) and reason_codes:
-        joined = ", ".join(str(x) for x in reason_codes[:6])
-        lines.append(f"- Caution flags: {joined}")
-
-    loc = ad_info.get("defect_location", {})
-    if isinstance(loc, dict) and loc.get("has_defect"):
-        region = loc.get("region", "unknown")
-        area = _to_float(loc.get("area_ratio"))
-        lines.append(f"- Defect location hint: {region}")
-        if area is not None and area > 0:
-            lines.append(f"- Defect area hint: {area * 100:.1f}% of image")
-    elif isinstance(loc, dict) and loc:
-        lines.append("- No reliable localized defect hint")
+        joined = ", ".join(str(x) for x in reason_codes[:4])
+        lines.append(f"- 주의 플래그: {joined}")
 
     if not lines:
         return "No anomaly detection information available."
@@ -584,6 +653,16 @@ class BaseLLMClient(ABC):
 
         result["is_anomaly_LLM"] = _normalize_decision(parsed.get("is_anomaly", False))
         result["llm_report"] = parsed.get("report", parsed)
-        result["llm_summary"] = parsed.get("summary")
+        llm_summary = parsed.get("summary")
+        if isinstance(llm_summary, dict):
+            summary_text = llm_summary.get("summary")
+            if isinstance(summary_text, str):
+                limited = _limit_to_n_sentences(summary_text, max_sentences=3)
+                if limited:
+                    llm_summary = dict(llm_summary)
+                    llm_summary["summary"] = limited
+        elif isinstance(llm_summary, str):
+            llm_summary = _limit_to_n_sentences(llm_summary, max_sentences=3)
+        result["llm_summary"] = llm_summary
 
         return result

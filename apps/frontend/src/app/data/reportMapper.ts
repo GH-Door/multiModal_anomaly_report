@@ -270,8 +270,6 @@ export function mapReportsToAnomalyCases(raw: any[]): AnomalyCase[] {
       llmSummaryObj.summary,
       llmSummaryObj._text,
       llmReport.summary,
-      llmReport.description,
-      llmReport.raw_response,
       r.summary,
     ]) ?? "";
     const llmSummaryDisplay =
