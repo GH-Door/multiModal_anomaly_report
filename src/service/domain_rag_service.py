@@ -88,6 +88,12 @@ class DomainKnowledgeRagService:
         ad_decision = str((ad_data or {}).get("ad_decision", "")).lower()
         if ad_decision == "normal":
             return f"{category} normal product appearance"
+        if ad_decision == "anomaly":
+            decision_conf = 0.0
+            try:
+                decision_conf = float((ad_data or {}).get("decision_confidence") or 0.0)
+            except (TypeError, ValueError):
+                decision_conf = 0.0
 
         region = (ad_data or {}).get("region")
         area_ratio = (ad_data or {}).get("area_ratio")
@@ -98,6 +104,8 @@ class DomainKnowledgeRagService:
             extra.append(f"area_ratio {area_ratio}")
 
         suffix = f" {' '.join(extra)}" if extra else ""
+        if ad_decision == "anomaly" and decision_conf >= 0.8:
+            return f"{category} defect failure case root cause inspection{suffix}"
         return f"{category} defect anomaly inspection{suffix}"
 
     def build_report_instruction(

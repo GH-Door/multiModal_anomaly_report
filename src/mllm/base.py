@@ -47,36 +47,27 @@ Finally, you should output a list of answer, such as:
 # ── Report generation prompts ──────────────────────────────────────────
 
 REPORT_PROMPT = '''당신은 제조 품질관리 수석 검사관입니다.
-목표는 단일 제품 이미지로 고품질 검사 리포트를 작성하는 것입니다.
-
 제품 카테고리: {category}
 
-판정 우선순위:
-1) 이미지에서 확인되는 시각적 근거(최우선)
-2) 일반 결함 지식
-3) 기타 단서
+판정 원칙:
+1) 이미지에서 보이는 시각 근거를 최우선으로 사용하세요.
+2) 근거가 명확할 때만 "is_anomaly"를 true로 설정하세요.
+3) 근거가 약하면 "is_anomaly"를 false로 두고 confidence를 낮게 설정하세요.
+4) 이미지에 없는 결함/원인/위치 추측을 금지합니다.
 
-품질 규칙:
-- 눈으로 확인 가능한 구체적 결함 근거가 있을 때만 "is_anomaly"를 true로 설정하세요.
-- 근거가 약하거나 모호하면 "is_anomaly"를 false로 두고 confidence를 낮게 설정하세요.
-- 이미지에 보이지 않는 결함/원인/위치를 추측해 만들어내지 마세요.
+출력 규칙:
+- JSON만 출력하세요(설명 문장/코드블록 금지).
+- 아래 스키마의 key 이름을 그대로 사용하세요.
+- 문자열 value는 한국어로 작성하세요.
+- "severity", "risk_level"은 low/medium/high/none 중 하나만 사용하세요.
+- "confidence"는 0.00~1.00 범위 숫자여야 합니다.
 
-출력 언어/형식 규칙:
-- JSON만 출력하세요(마크다운, 코드블록, 설명 문장 금지).
-- JSON key 이름은 아래 스키마와 정확히 동일하게 유지하세요.
-- 모든 문자열 value는 한국어로 작성하세요.
-- 단 "severity"와 "risk_level" 값은 low, medium, high, none 중 하나만 사용하세요.
-- "confidence"는 0.00~1.00 범위의 숫자로 작성하세요.
+일관성 규칙:
+- "is_anomaly"=false이면 anomaly_type/severity/location/possible_cause/risk_level은 모두 "none".
+- "is_anomaly"=true이면 anomaly_type은 "none" 금지, severity/risk_level은 "none" 금지.
+- anomaly 설명에는 최소 2개의 구체적 시각 근거(무엇이, 어디에)를 포함하세요.
 
-필드 일관성 규칙:
-- "is_anomaly"가 false인 경우:
-  anomaly_type="none", severity="none", location="none", possible_cause="none", risk_level="none"으로 맞추세요.
-  description에는 정상 판정의 시각적 근거를 작성하세요.
-- "is_anomaly"가 true인 경우:
-  anomaly_type은 구체적이어야 하며("none" 금지), severity/risk_level은 "none"이 아니어야 합니다.
-  description에는 최소 2개의 구체적 시각 근거(무엇이, 어디에)를 포함하세요.
-
-다음 결함 taxonomy를 참고해 가장 가까운 레이블을 선택하세요:
+결함 taxonomy:
 scratch, crack, dent, deformation, contamination, foreign_material, seal_defect,
 label_defect, print_defect, missing_part, misalignment, color_stain, other, none
 
@@ -92,52 +83,42 @@ label_defect, print_defect, missing_part, misalignment, color_stain, other, none
     "confidence": 0.0 to 1.0,
     "recommendation": "구체적 시정/예방 조치(한국어)"
   }},
-    "summary": {{
+  "summary": {{
     "summary": "정확히 3문장: 최종 판정 + 핵심 근거/긴급도 + 구체적 시정/예방조치(한국어)",
     "risk_level": "low/medium/high/none"
   }}
 }}'''
 
 REPORT_PROMPT_WITH_AD = '''당신은 제조 품질관리 수석 검사관입니다.
-목표는 단일 제품 이미지로 고품질 검사 리포트를 작성하는 것입니다.
-
 제품 카테고리: {category}
 
-다음은 이상탐지(AD) 모델의 사전 분석 결과입니다:
+AD 사전 분석:
 {ad_info}
 
-판정 우선순위:
-1) 이미지에서 확인되는 시각적 근거(최우선)
-2) AD 결과(보조 근거)
-3) 일반 결함 지식
+판정 원칙:
+1) 이미지 시각 근거를 최우선으로 사용하세요.
+2) AD는 보조 근거로 사용하세요.
+3) 근거가 약하면 "is_anomaly"를 false로 두고 confidence를 낮게 설정하세요.
+4) 이미지에 없는 결함/원인/위치 추측을 금지합니다.
 
-충돌 처리 규칙:
-- AD 결과와 시각 근거가 충돌하면 시각 근거를 우선하세요.
-- 중요한 충돌인 경우 description에 그 사실을 한국어로 간단히 명시하세요.
-- AD 판정이 ANOMALY/NORMAL이고 decision_confidence가 0.90 이상이면, 정반대 판정을 내릴 때 confidence를 0.55 이하로 제한하세요.
-- 위와 같이 정반대 판정을 내릴 때는 description에 "AD와 충돌"의 시각적 반증 근거를 반드시 포함하세요.
+충돌 규칙:
+- AD와 시각 근거가 충돌하면 시각 근거를 우선합니다.
+- 단, AD 판정이 ANOMALY/NORMAL이고 decision_confidence>=0.90인 강한 신호에서 정반대 판정을 내릴 경우:
+  confidence는 0.55 이하로 제한하고, description에 시각적 반증 근거와 "AD와 충돌"을 명시하세요.
 
-품질 규칙:
-- 눈으로 확인 가능한 구체적 결함 근거가 있을 때만 "is_anomaly"를 true로 설정하세요.
-- 근거가 약하거나 모호하면 "is_anomaly"를 false로 두고 confidence를 낮게 설정하세요.
-- 이미지에 보이지 않는 결함/원인/위치를 추측해 만들어내지 마세요.
+출력 규칙:
+- JSON만 출력하세요(설명 문장/코드블록 금지).
+- 아래 스키마의 key 이름을 그대로 사용하세요.
+- 문자열 value는 한국어로 작성하세요.
+- "severity", "risk_level"은 low/medium/high/none 중 하나만 사용하세요.
+- "confidence"는 0.00~1.00 범위 숫자여야 합니다.
 
-출력 언어/형식 규칙:
-- JSON만 출력하세요(마크다운, 코드블록, 설명 문장 금지).
-- JSON key 이름은 아래 스키마와 정확히 동일하게 유지하세요.
-- 모든 문자열 value는 한국어로 작성하세요.
-- 단 "severity"와 "risk_level" 값은 low, medium, high, none 중 하나만 사용하세요.
-- "confidence"는 0.00~1.00 범위의 숫자로 작성하세요.
+일관성 규칙:
+- "is_anomaly"=false이면 anomaly_type/severity/location/possible_cause/risk_level은 모두 "none".
+- "is_anomaly"=true이면 anomaly_type은 "none" 금지, severity/risk_level은 "none" 금지.
+- anomaly 설명에는 최소 2개의 구체적 시각 근거(무엇이, 어디에)를 포함하세요.
 
-필드 일관성 규칙:
-- "is_anomaly"가 false인 경우:
-  anomaly_type="none", severity="none", location="none", possible_cause="none", risk_level="none"으로 맞추세요.
-  description에는 정상 판정의 시각적 근거를 작성하세요.
-- "is_anomaly"가 true인 경우:
-  anomaly_type은 구체적이어야 하며("none" 금지), severity/risk_level은 "none"이 아니어야 합니다.
-  description에는 최소 2개의 구체적 시각 근거(무엇이, 어디에)를 포함하세요.
-
-다음 결함 taxonomy를 참고해 가장 가까운 레이블을 선택하세요:
+결함 taxonomy:
 scratch, crack, dent, deformation, contamination, foreign_material, seal_defect,
 label_defect, print_defect, missing_part, misalignment, color_stain, other, none
 

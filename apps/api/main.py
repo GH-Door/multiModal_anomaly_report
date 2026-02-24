@@ -478,18 +478,26 @@ def _strong_ad_llm_conflict(
     if (llm_flag and ad_decision_norm == "anomaly") or ((not llm_flag) and ad_decision_norm == "normal"):
         return False
 
-    decision_conf = _safe_float(ad_data.get("decision_confidence"))
-    if decision_conf is None:
-        decision_conf = 0.0
-
     basis = ad_data.get("decision_basis")
     if not isinstance(basis, dict):
         basis = {}
+    decision_conf = float(_safe_float(ad_data.get("decision_confidence")) or 0.0)
+    score = _safe_float(ad_data.get("ad_score"))
     score_delta = abs(float(_safe_float(basis.get("score_delta")) or 0.0))
 
     reliability = str(policy.get("reliability", "medium")).strip().lower()
-    min_conf = {"high": 0.80, "medium": 0.88, "low": 0.95}.get(reliability, 0.88)
-    min_delta = {"high": 0.08, "medium": 0.12, "low": 0.18}.get(reliability, 0.12)
+    min_conf = {"high": 0.65, "medium": 0.72, "low": 0.82}.get(reliability, 0.72)
+    min_delta = {"high": 0.05, "medium": 0.08, "low": 0.12}.get(reliability, 0.08)
+    margin = {"high": 0.05, "medium": 0.08, "low": 0.12}.get(reliability, 0.08)
+
+    if ad_decision_norm == "anomaly":
+        t_high = _safe_float(policy.get("t_high"))
+        if score is not None and t_high is not None and score >= float(t_high) + margin:
+            return True
+    else:
+        t_low = _safe_float(policy.get("t_low"))
+        if score is not None and t_low is not None and score <= float(t_low) - margin:
+            return True
 
     return bool(decision_conf >= min_conf and score_delta >= min_delta)
 
@@ -519,6 +527,61 @@ def _final_decision_with_guardrail(
         )
         return "review_needed"
     return base
+
+
+def _annotate_review_needed_response(
+    llm_response: dict[str, Any],
+    *,
+    ad_decision: str,
+    ad_data: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    """When guardrail triggers, keep report text consistent with review_needed."""
+    llm_flag = _to_bool_like(llm_response.get("is_anomaly_llm"))
+    if llm_flag is not False:
+        return llm_response
+    if not _strong_ad_llm_conflict(
+        llm_flag=llm_flag,
+        ad_decision=ad_decision,
+        ad_data=ad_data,
+        policy=policy,
+    ):
+        return llm_response
+
+    out = dict(llm_response)
+    llm_report = out.get("llm_report")
+    if isinstance(llm_report, dict):
+        report = dict(llm_report)
+        conf = _safe_float(report.get("confidence"))
+        if conf is None or conf > 0.55:
+            report["confidence"] = 0.55
+        desc = str(report.get("description", "")).strip()
+        note = "AD 강한 이상 신호와 시각 판정이 충돌하여 수동 검토가 필요합니다."
+        if note not in desc:
+            report["description"] = f"{desc} {note}".strip()
+        recommendation = str(report.get("recommendation", "")).strip().lower()
+        if recommendation in {"", "none", "없음", "해당 없음"}:
+            report["recommendation"] = "수동 재검수(원본 이미지 확대 확인 및 동일 라인 샘플 재검사)를 진행하세요."
+        out["llm_report"] = report
+
+    llm_summary = out.get("llm_summary")
+    if isinstance(llm_summary, dict):
+        summary = dict(llm_summary)
+        summary["summary"] = (
+            "최종 상태는 수동 검토 필요입니다. "
+            "AD 강한 이상 신호와 시각 판정이 충돌했습니다. "
+            "원본 확대 확인과 동일 라인 재검사로 최종 판정을 확정하세요."
+        )
+        summary["risk_level"] = "medium"
+        out["llm_summary"] = summary
+    elif isinstance(llm_summary, str):
+        out["llm_summary"] = (
+            "최종 상태는 수동 검토 필요입니다. "
+            "AD 강한 이상 신호와 시각 판정이 충돌했습니다. "
+            "원본 확대 확인과 동일 라인 재검사로 최종 판정을 확정하세요."
+        )
+
+    return out
 
 
 def _has_llm_content(llm_response: dict[str, Any]) -> bool:
@@ -677,6 +740,13 @@ def _finalize_rag_llm_pipeline(
             ad_data=ad_result,
             policy=policy,
         )
+        if llm_decision == "review_needed":
+            llm_response = _annotate_review_needed_response(
+                llm_response,
+                ad_decision=ad_decision,
+                ad_data=ad_result,
+                policy=policy,
+            )
         _safe_update_report(
             conn,
             report_id,
