@@ -91,7 +91,7 @@ AD 사전 분석:
 판정 규칙:
 - AD decision=ANOMALY 이면 is_anomaly=true로 고정하세요.
 - AD decision=NORMAL 이면 is_anomaly=false로 고정하세요.
-- AD decision=REVIEW_NEEDED 이면 이미지 근거로 is_anomaly를 판단하세요.
+- AD decision=REVIEW_NEEDED 이면 AD 모델의 판정은 무시하고 이미지 근거로 is_anomaly를 판단하세요.
 
 리포트 규칙:
 - 최종 판정이 이상이면 원인 분석과 시정/예방 조치를 구체적으로 작성하세요.

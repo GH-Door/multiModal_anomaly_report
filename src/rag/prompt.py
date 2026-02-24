@@ -54,7 +54,7 @@ AD 사전 분석:
 판정 규칙:
 - AD decision=ANOMALY 이면 is_anomaly=true로 고정하세요.
 - AD decision=NORMAL 이면 is_anomaly=false로 고정하세요.
-- AD decision=REVIEW_NEEDED 이면 이미지 근거로 is_anomaly를 판단하세요.
+- AD decision=REVIEW_NEEDED 이면 AD 모델의 판정은 무시하고 이미지 근거로 is_anomaly를 판단하세요.
 
 RAG 사용:
 - 도메인 지식은 결함명/원인 설명 보조에만 사용하세요.
