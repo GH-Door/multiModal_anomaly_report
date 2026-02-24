@@ -391,47 +391,62 @@ def _decide_with_policy(
     model_threshold: float,
     class_calibration: dict[str, Any] | None = None,
 ) -> tuple[str, bool, dict[str, Any]]:
-    calibration = class_calibration or {}
-    center = _safe_float(calibration.get("center_threshold"))
-    if center is None:
+    _ = class_calibration  # Kept for API compatibility; decision now uses explicit t_low/t_high only.
+
+    t_low = _safe_float(class_policy.get("t_low"))
+    t_high = _safe_float(class_policy.get("t_high"))
+    if t_low is None or t_high is None:
         center = _safe_float(class_policy.get("legacy_center"))
-    if center is None:
-        center = float(model_threshold)
-    center = _clip(float(center), 0.0, 1.0)
+        if center is None:
+            center = float(model_threshold)
+        center = _clip(float(center), 0.0, 1.0)
+        review_band = _safe_float(class_policy.get("review_band"))
+        if review_band is None:
+            review_band = 0.08
+        band = _clip(float(review_band), 0.02, 0.35)
+        t_low = _clip(center - band, 0.0, 1.0)
+        t_high = _clip(center + band, 0.0, 1.0)
+    else:
+        t_low = _clip(float(t_low), 0.0, 1.0)
+        t_high = _clip(float(t_high), 0.0, 1.0)
+        if t_low > t_high:
+            t_low, t_high = t_high, t_low
+        center = _clip((t_low + t_high) / 2.0, 0.0, 1.0)
+        band = _clip((t_high - t_low) / 2.0, 0.02, 0.35)
 
-    base_band = _safe_float(class_policy.get("review_band"))
-    if base_band is None:
-        base_band = 0.08
-    calib_band = _safe_float(calibration.get("review_band"))
-    if calib_band is not None:
-        base_band = max(float(base_band), float(calib_band))
-
-    reliability = str(class_policy.get("reliability", "medium")).lower()
-    reliability_scale = {"high": 0.9, "medium": 1.0, "low": 1.3}.get(reliability, 1.0)
-    uncertainty_band = _clip(float(base_band) * reliability_scale, 0.02, 0.35)
-
-    score_delta = float(anomaly_score) - center
-    if score_delta > uncertainty_band:
+    score = float(anomaly_score)
+    score_delta = score - center
+    if score >= t_high:
         decision = "anomaly"
         review_needed = False
-    elif score_delta < -uncertainty_band:
+    elif score <= t_low:
         decision = "normal"
         review_needed = False
     else:
         decision = "review_needed"
         review_needed = True
 
-    decision_confidence = round(
-        _clip(abs(score_delta) / max(1e-6, uncertainty_band * 2.5), 0.0, 1.0),
-        4,
-    )
+    if review_needed:
+        # Confidence is lower near the center of [t_low, t_high], higher near boundaries.
+        half_band = max(1e-6, (t_high - t_low) / 2.0)
+        near_boundary = min(score - t_low, t_high - score)
+        decision_confidence = round(_clip(near_boundary / half_band, 0.0, 1.0), 4)
+    elif decision == "anomaly":
+        denom = max(1e-6, 1.0 - t_high)
+        decision_confidence = round(_clip((score - t_high) / denom, 0.0, 1.0), 4)
+    else:
+        denom = max(1e-6, t_low)
+        decision_confidence = round(_clip((t_low - score) / denom, 0.0, 1.0), 4)
+
     return decision, review_needed, {
         "decision_confidence": decision_confidence,
         "basis": {
             "center_threshold": round(center, 4),
-            "uncertainty_band": round(float(uncertainty_band), 4),
+            "uncertainty_band": round(float(band), 4),
             "score_delta": round(float(score_delta), 4),
-            "used_calibration": bool(calibration),
+            "used_calibration": False,
+            "t_low": round(float(t_low), 4),
+            "t_high": round(float(t_high), 4),
         },
     }
 
@@ -460,48 +475,6 @@ def _final_decision_from_llm(llm_response: dict[str, Any]) -> str:
     return "review_needed"
 
 
-def _strong_ad_llm_conflict(
-    *,
-    llm_flag: bool | None,
-    ad_decision: str,
-    ad_data: dict[str, Any],
-    policy: dict[str, Any],
-) -> bool:
-    """Return True when AD and LLM strongly disagree and needs manual review."""
-    if llm_flag is None:
-        return False
-
-    ad_decision_norm = str(ad_decision or "").strip().lower()
-    if ad_decision_norm not in {"anomaly", "normal"}:
-        return False
-
-    if (llm_flag and ad_decision_norm == "anomaly") or ((not llm_flag) and ad_decision_norm == "normal"):
-        return False
-
-    basis = ad_data.get("decision_basis")
-    if not isinstance(basis, dict):
-        basis = {}
-    decision_conf = float(_safe_float(ad_data.get("decision_confidence")) or 0.0)
-    score = _safe_float(ad_data.get("ad_score"))
-    score_delta = abs(float(_safe_float(basis.get("score_delta")) or 0.0))
-
-    reliability = str(policy.get("reliability", "medium")).strip().lower()
-    min_conf = {"high": 0.65, "medium": 0.72, "low": 0.82}.get(reliability, 0.72)
-    min_delta = {"high": 0.05, "medium": 0.08, "low": 0.12}.get(reliability, 0.08)
-    margin = {"high": 0.05, "medium": 0.08, "low": 0.12}.get(reliability, 0.08)
-
-    if ad_decision_norm == "anomaly":
-        t_high = _safe_float(policy.get("t_high"))
-        if score is not None and t_high is not None and score >= float(t_high) + margin:
-            return True
-    else:
-        t_low = _safe_float(policy.get("t_low"))
-        if score is not None and t_low is not None and score <= float(t_low) - margin:
-            return True
-
-    return bool(decision_conf >= min_conf and score_delta >= min_delta)
-
-
 def _final_decision_with_guardrail(
     *,
     llm_response: dict[str, Any],
@@ -509,96 +482,14 @@ def _final_decision_with_guardrail(
     ad_data: dict[str, Any],
     policy: dict[str, Any],
 ) -> str:
-    llm_flag = _to_bool_like(llm_response.get("is_anomaly_llm"))
-    base = _final_decision_from_llm(llm_response)
+    _ = ad_data
+    _ = policy
     ad_decision_norm = str(ad_decision or "").strip().lower()
-
-    # Hard fail-safe: do not finalize as normal when AD says anomaly.
-    if base == "normal" and ad_decision_norm == "anomaly":
-        logger.info(
-            "AD anomaly vs LLM normal -> review_needed (hard guard) | decision_conf=%.4f score_delta=%.4f reliability=%s",
-            float(_safe_float(ad_data.get("decision_confidence")) or 0.0),
-            abs(float(_safe_float((ad_data.get("decision_basis") or {}).get("score_delta")) or 0.0)),
-            str(policy.get("reliability", "medium")).lower(),
-        )
-        return "review_needed"
-
-    if base == "normal" and _strong_ad_llm_conflict(
-        llm_flag=llm_flag,
-        ad_decision=ad_decision,
-        ad_data=ad_data,
-        policy=policy,
-    ):
-        logger.info(
-            "AD/LLM strong conflict -> review_needed | ad_decision=%s llm_flag=%s decision_conf=%.4f score_delta=%.4f reliability=%s",
-            str(ad_decision or "").lower(),
-            llm_flag,
-            float(_safe_float(ad_data.get("decision_confidence")) or 0.0),
-            abs(float(_safe_float((ad_data.get("decision_basis") or {}).get("score_delta")) or 0.0)),
-            str(policy.get("reliability", "medium")).lower(),
-        )
-        return "review_needed"
-    return base
-
-
-def _annotate_review_needed_response(
-    llm_response: dict[str, Any],
-    *,
-    ad_decision: str,
-    ad_data: dict[str, Any],
-    policy: dict[str, Any],
-) -> dict[str, Any]:
-    """When guardrail triggers, keep report text consistent with review_needed."""
-    llm_flag = _to_bool_like(llm_response.get("is_anomaly_llm"))
-    if llm_flag is not False:
-        return llm_response
-    ad_decision_norm = str(ad_decision or "").strip().lower()
-    conflict_guard = (
-        ad_decision_norm == "anomaly"
-        or _strong_ad_llm_conflict(
-            llm_flag=llm_flag,
-            ad_decision=ad_decision,
-            ad_data=ad_data,
-            policy=policy,
-        )
-    )
-    if not conflict_guard:
-        return llm_response
-
-    out = dict(llm_response)
-    llm_report = out.get("llm_report")
-    if isinstance(llm_report, dict):
-        report = dict(llm_report)
-        conf = _safe_float(report.get("confidence"))
-        if conf is None or conf > 0.55:
-            report["confidence"] = 0.55
-        desc = str(report.get("description", "")).strip()
-        note = "AD 강한 이상 신호와 시각 판정이 충돌하여 수동 검토가 필요합니다."
-        if note not in desc:
-            report["description"] = f"{desc} {note}".strip()
-        recommendation = str(report.get("recommendation", "")).strip().lower()
-        if recommendation in {"", "none", "없음", "해당 없음"}:
-            report["recommendation"] = "수동 재검수(원본 이미지 확대 확인 및 동일 라인 샘플 재검사)를 진행하세요."
-        out["llm_report"] = report
-
-    llm_summary = out.get("llm_summary")
-    if isinstance(llm_summary, dict):
-        summary = dict(llm_summary)
-        summary["summary"] = (
-            "최종 상태는 수동 검토 필요입니다. "
-            "AD 강한 이상 신호와 시각 판정이 충돌했습니다. "
-            "원본 확대 확인과 동일 라인 재검사로 최종 판정을 확정하세요."
-        )
-        summary["risk_level"] = "medium"
-        out["llm_summary"] = summary
-    elif isinstance(llm_summary, str):
-        out["llm_summary"] = (
-            "최종 상태는 수동 검토 필요입니다. "
-            "AD 강한 이상 신호와 시각 판정이 충돌했습니다. "
-            "원본 확대 확인과 동일 라인 재검사로 최종 판정을 확정하세요."
-        )
-
-    return out
+    # Outside [t_low, t_high] -> follow AD decision.
+    if ad_decision_norm in {"anomaly", "normal"}:
+        return ad_decision_norm
+    # Inside [t_low, t_high] (review_needed) -> let LLM decide.
+    return _final_decision_from_llm(llm_response)
 
 
 def _has_llm_content(llm_response: dict[str, Any]) -> bool:
@@ -757,13 +648,6 @@ def _finalize_rag_llm_pipeline(
             ad_data=ad_result,
             policy=policy,
         )
-        if llm_decision == "review_needed":
-            llm_response = _annotate_review_needed_response(
-                llm_response,
-                ad_decision=ad_decision,
-                ad_data=ad_result,
-                policy=policy,
-            )
         _safe_update_report(
             conn,
             report_id,
@@ -1007,10 +891,20 @@ def _run_inspection_pipeline(
         class_calibration=calibration,
     )
     basis = decision_meta.get("basis", {})
-    center = _clip(float(_safe_float(basis.get("center_threshold")) or model_thr), 0.0, 1.0)
-    band = _clip(float(_safe_float(basis.get("uncertainty_band")) or policy.get("review_band", 0.08)), 0.02, 0.35)
-    t_low = _clip(center - band, 0.0, 1.0)
-    t_high = _clip(center + band, 0.0, 1.0)
+    basis_t_low = _safe_float(basis.get("t_low"))
+    basis_t_high = _safe_float(basis.get("t_high"))
+    if basis_t_low is not None and basis_t_high is not None:
+        t_low = _clip(float(basis_t_low), 0.0, 1.0)
+        t_high = _clip(float(basis_t_high), 0.0, 1.0)
+        if t_low > t_high:
+            t_low, t_high = t_high, t_low
+        center = _clip((t_low + t_high) / 2.0, 0.0, 1.0)
+        band = max(1e-6, (t_high - t_low) / 2.0)
+    else:
+        center = _clip(float(_safe_float(basis.get("center_threshold")) or model_thr), 0.0, 1.0)
+        band = _clip(float(_safe_float(basis.get("uncertainty_band")) or policy.get("review_band", 0.08)), 0.0, 0.35)
+        t_low = _clip(center - band, 0.0, 1.0)
+        t_high = _clip(center + band, 0.0, 1.0)
     applied_policy = {
         "class_key": str(policy.get("class_key", model_category)),
         "source": policy_source,
