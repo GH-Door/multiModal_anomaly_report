@@ -136,7 +136,6 @@ def run_ad_inference(cfg: ExperimentConfig, data_root: str, mmad_json: str) -> s
     # Build command
     cmd = [
         sys.executable, inference_script,
-        "--backend", "ckpt",
         "--checkpoint-dir", checkpoint_dir,
         "--data-root", data_root,
         "--mmad-json", mmad_json,
@@ -327,6 +326,13 @@ def run_experiment(cfg: ExperimentConfig) -> Path:
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)
+
+    # Warm up local model before timing starts (excludes cold-start from per-image latency)
+    if hasattr(llm_client, 'load_model'):
+        print("Warming up model (pre-loading weights)...")
+        llm_client.load_model()
+        print("Model ready.")
+        print()
 
     # Track statistics
     total_correct = 0

@@ -3,12 +3,9 @@
 **What you get in Step 1**
 - ✅ MMAD(`mmad.json`) loader + MMAD-style MCQ evaluation runner
 - ✅ End-to-end demo pipeline: **image → anomaly model → structured defect → report(JSON)**
-- ✅ FastAPI inference server + Streamlit dashboard
-- ✅ Paths are fully configurable via `.env` / `configs/runtime.yaml` so you can move between local ↔ Colab ↔ AWS easily.
+- ✅ FastAPI inference server + React frontend
+- ✅ Paths are fully configurable via environment variables
 - ✅ Designed so Step 2 can add **PatchCore / AnomalyCLIP** without rewriting the app.
-
-> Step 1 intentionally uses **DummyEdgeAnomaly** + **EchoMLLM** so it runs on CPU and the pipeline is testable.
-> You will replace these with real models in Step 2.
 
 ---
 
@@ -18,7 +15,7 @@
 mmad_inspector_mvp/
   apps/
     api/          # FastAPI
-    dashboard/    # Streamlit
+    frontend/     # React
   configs/
   scripts/
   src/mmad_inspector/
@@ -43,48 +40,36 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-2. Edit `.env`:
-- `MMAD_DATA_ROOT`: root folder that contains images like `DS-MVTec/...png`
-- `MMAD_JSON_PATH`: path to `mmad.json`
-
-Or directly edit `configs/runtime.yaml`.
+2. Edit `.env` and set your runtime paths/keys.
 
 ---
 
 ## 3) Run evaluation (MMAD-style accuracy)
 
 ```bash
-python scripts/eval_mmad.py --config configs/eval.yaml
+python scripts/eval_llm_baseline.py --model gemini --few-shot 1 --similar-template
 ```
-
-This will create:
-- `outputs/eval/mmad_eval.json` (pred records + summary)
 
 ---
 
-## 4) Run API + Dashboard
+## 4) Run API + Frontend
 
 Terminal A:
 ```bash
 uvicorn apps.api.main:app --reload --port 8000
 ```
 
-Terminal B:
+Terminal B (React frontend):
 ```bash
-streamlit run apps/dashboard/app.py
+cd apps/frontend
+npm ci
+cp .env.example .env.local
+npm run dev -- --host 0.0.0.0 --port 5173
 ```
+
+See deployment/handoff runbook: `docs/deploy-and-handoff.md`
 
 ---
 
 ## Step 2: how to extend (PatchCore / AnomalyCLIP)
-When you add PatchCore/AnomalyCLIP later, you only need to implement `AnomalyModel.infer()` in:
-- `src/mmad_inspector/anomaly/patchcore_adapter.py`
-- `src/mmad_inspector/anomaly/anomalyclip_adapter.py`
-
-Then switch in `configs/runtime.yaml`:
-```yaml
-anomaly:
-  model: patchcore
-```
-
-Everything else (API/UI/eval/report schema) stays the same.
+Everything else (API/UI/eval/report pipeline) stays the same.
