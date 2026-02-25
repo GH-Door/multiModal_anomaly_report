@@ -58,68 +58,69 @@ TEST_QUERIES_EXTERNAL: List[Dict] = [
 ]
 
 # ── MMAD JSON 지식 회귀 테스트 쿼리 ─────────────────────────────────────────────
-# 프로덕션 형태 쿼리: build_generic_query(category) 와 동일한 패턴
+# 프로덕션 형태 쿼리: 카테고리 이름을 직접 노출하지 않고 결함 현상을 자연어로 기술
 # defect_type을 쿼리에 포함하지 않음 → 실제 평가 조건과 일치
+# BM25가 page_content(결함 설명)와 토큰 매칭 가능하도록 결함 현상 중심 자연어로 작성
 TEST_QUERIES_MMAD: List[Dict] = [
     {
-        "query": "food_package defect anomaly inspection",
+        "query": "seal failure surface contamination or label misalignment on packaged food product",
         "relevant_datasets": ["GoodsAD"],
         "relevant_category": "food_package",
-        "description": "GoodsAD food_package (generic query)",
+        "description": "GoodsAD food_package (natural language query)",
     },
     {
-        "query": "drink_bottle defect anomaly inspection",
+        "query": "plastic bottle surface scratch dent deformed cap or body crack anomaly",
         "relevant_datasets": ["GoodsAD"],
         "relevant_category": "drink_bottle",
-        "description": "GoodsAD drink_bottle (generic query)",
+        "description": "GoodsAD drink_bottle (natural language query)",
     },
     {
-        "query": "food_box defect anomaly inspection",
+        "query": "cardboard box crumpled corner torn edge damaged printing or surface deformation",
         "relevant_datasets": ["GoodsAD"],
         "relevant_category": "food_box",
-        "description": "GoodsAD food_box (generic query)",
+        "description": "GoodsAD food_box (natural language query)",
     },
     {
-        "query": "cigarette_box defect anomaly inspection",
+        "query": "packaging surface shows torn film misaligned print coating crack or seal defect",
         "relevant_datasets": ["GoodsAD"],
         "relevant_category": "cigarette_box",
-        "description": "GoodsAD cigarette_box (generic query)",
+        "description": "GoodsAD cigarette_box (natural language query)",
     },
     {
-        "query": "food_bottle defect anomaly inspection",
+        "query": "glass bottle surface chip crack label peel or closure seal anomaly detected",
         "relevant_datasets": ["GoodsAD"],
         "relevant_category": "food_bottle",
-        "description": "GoodsAD food_bottle (generic query)",
+        "description": "GoodsAD food_bottle (natural language query)",
     },
     {
-        "query": "drink_can defect anomaly inspection",
+        "query": "aluminum can surface dent scratch oxidation or structural deformation anomaly",
         "relevant_datasets": ["GoodsAD"],
         "relevant_category": "drink_can",
-        "description": "GoodsAD drink_can (generic query)",
+        "description": "GoodsAD drink_can (natural language query)",
     },
     {
-        "query": "juice_bottle defect anomaly inspection",
+        "query": "beverage bottle shows misaligned label incomplete seal or foreign contamination on surface",
         "relevant_datasets": ["MVTec-LOCO"],
         "relevant_category": "juice_bottle",
-        "description": "MVTec-LOCO juice_bottle (generic query)",
+        "description": "MVTec-LOCO juice_bottle (natural language query)",
     },
     {
-        "query": "breakfast_box defect anomaly inspection",
+        "query": "food box packaging surface has fold damage ink smear torn flap or structural collapse",
         "relevant_datasets": ["MVTec-LOCO"],
         "relevant_category": "breakfast_box",
-        "description": "MVTec-LOCO breakfast_box (generic query)",
+        "description": "MVTec-LOCO breakfast_box (natural language query)",
     },
     {
-        "query": "pushpins defect anomaly inspection",
+        "query": "metal fastener head shows rust oxidation abnormal shape or surface scratch manufacturing defect",
         "relevant_datasets": ["MVTec-LOCO"],
         "relevant_category": "pushpins",
-        "description": "MVTec-LOCO pushpins (generic query)",
+        "description": "MVTec-LOCO pushpins (natural language query)",
     },
     {
-        "query": "screw_bag defect anomaly inspection",
+        "query": "hardware bag contains mixed component missing part or foreign material anomaly",
         "relevant_datasets": ["MVTec-LOCO"],
         "relevant_category": "screw_bag",
-        "description": "MVTec-LOCO screw_bag (generic query)",
+        "description": "MVTec-LOCO screw_bag (natural language query)",
     },
 ]
 

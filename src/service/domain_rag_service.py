@@ -49,8 +49,7 @@ class DomainKnowledgeRagService:
 
             indexer = Indexer(json_path=str(self.json_path), persist_dir=str(self.persist_dir))
             vectorstore = indexer.get_or_create()
-            rag_docs = indexer.load_documents()
-            self._retriever = Retrievers(vectorstore, documents=rag_docs, mode="hybrid")
+            self._retriever = Retrievers(vectorstore)
             self._report_prompt_rag = report_prompt_rag
             self._ready = True
 

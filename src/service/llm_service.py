@@ -174,6 +174,7 @@ class LlmService:
         category: str,
         ad_data: Dict[str, Any],
         policy: Dict[str, Any],
+        domain_rag_enabled: bool = True,
     ) -> Dict[str, Any]:
         ad_decision_raw = _norm_decision(str(ad_data.get("ad_decision", "review_needed")))
         defect_type_hint = _extract_defect_type_hint(ad_data)
@@ -244,7 +245,7 @@ class LlmService:
 
         report_instruction: str | None = None
         prompt_mode = "ad_only"
-        if self.domain_rag_service is not None:
+        if domain_rag_enabled and self.domain_rag_service is not None:
             try:
                 report_instruction = self.domain_rag_service.build_report_instruction(
                     model_category=category,

@@ -37,13 +37,13 @@ class ExperimentConfig:
     rag: bool = False                        # RAG 도메인 지식 주입 여부
     rag_json_path: Optional[str] = None      # domain_knowledge.json 경로
     rag_persist_dir: Optional[str] = None    # Chroma vectorstore 경로 (Config A/B/C 비교용)
-    rag_mode: str = "hybrid"                 # dense | bm25 | hybrid
+    rag_k: int = 3                           # 검색할 문서 수
 
     @property
     def experiment_name(self) -> str:
-        """Auto-generate experiment name: {ad_model}_{llm}_{few_shot}shot[_rag_{mode}]"""
+        """Auto-generate experiment name: {ad_model}_{llm}_{few_shot}shot[_rag]"""
         ad = self.ad_model or "no_ad"
-        rag_suffix = f"_rag_{self.rag_mode}" if self.rag else ""
+        rag_suffix = "_rag" if self.rag else ""
         return f"{ad}_{self.llm}_{self.few_shot}shot{rag_suffix}"
 
 
@@ -79,5 +79,5 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
         ad_version=ad_section.get("version"),
         rag=rag_section.get("enabled", False),
         rag_json_path=rag_section.get("json_path"),
-        rag_mode=rag_section.get("mode", "hybrid"),
+        rag_k=rag_section.get("top_k", 3),
     )
