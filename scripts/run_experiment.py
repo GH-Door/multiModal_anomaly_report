@@ -380,12 +380,10 @@ def run_experiment(cfg: ExperimentConfig) -> Path:
             ds_name = parts[0] if len(parts) > 0 else ""
             cat_name = parts[1] if len(parts) > 1 else ""
 
-            defect_type = parts[3] if len(parts) > 3 else ""
-            query = rag_retriever.build_query(cat_name, defect_type)
-            # anomaly: defect_type 필터로 해당 결함 문서만 검색
-            # good: defect_type 필터 없이 의미 검색 + source_type="json" 으로 PDF 노이즈 차단
-            dt_filter = defect_type if defect_type != "good" else None
-            docs = rag_retriever.retrieve(query, category=cat_name, defect_type=dt_filter, k=3)
+            # defect_type 유출 방지: ground-truth defect_type을 쿼리/필터에 사용하지 않음
+            # 프로덕션과 동일한 generic 쿼리 사용 (category 기반)
+            query = rag_retriever.build_generic_query(cat_name)
+            docs = rag_retriever.retrieve(query, category=cat_name, defect_type=None, k=cfg.rag_k)
             domain_knowledge = rag_retriever.format_context(docs)
 
             ad_info_str = format_ad_info(ad_info) if ad_info else ""
@@ -551,6 +549,8 @@ def main():
     parser.add_argument("--rag-persist-dir", type=str, default=None,
                         help="Chroma vectorstore 경로 (default: vectorstore/domain_knowledge). "
                              "Config A/B/C 비교 실험 시 각각 다른 경로 지정.")
+    parser.add_argument("--rag-top-k", type=int, default=None,
+                        help="RAG 검색 문서 수 (default: 3)")
 
     # Utility
     parser.add_argument("--list-models", action="store_true",
@@ -608,6 +608,8 @@ def main():
         cfg.rag_json_path = args.rag_json
     if args.rag_persist_dir is not None:
         cfg.rag_persist_dir = args.rag_persist_dir
+    if args.rag_top_k is not None:
+        cfg.rag_k = args.rag_top_k
 
     # 모델별 기본값 적용 (CLI로 명시하지 않은 경우)
     _BATCH_MODE_DEFAULTS = {

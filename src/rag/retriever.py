@@ -5,9 +5,15 @@ from langchain_chroma import Chroma
 
 
 class Retrievers:
-    """Semantic search over domain knowledge with optional metadata filtering."""
+    """Semantic search over domain knowledge with optional metadata filtering.
 
-    def __init__(self, vectorstore: Chroma):
+    Dense embedding similarity search via Chroma.
+    """
+
+    def __init__(
+        self,
+        vectorstore: Chroma,
+    ):
         self.vectorstore = vectorstore
 
     def retrieve(
@@ -24,9 +30,7 @@ class Retrievers:
             query: Free-text query describing the defect or context.
             dataset: Filter by dataset name(s). str or list of str.
             category: Filter by category name(s). str or list of str.
-            defect_type: Exact defect type filter. anomaly 이미지에서 경로의
-                defect_type을 넘기면 해당 결함 문서만 검색해 노이즈를 제거한다.
-                good 이미지나 None이면 필터 없이 의미 검색만 수행한다.
+            defect_type: Exact defect type filter. ``None`` = no filter.
             k: Number of results to return.
 
         Returns:
@@ -36,7 +40,6 @@ class Retrievers:
         kwargs: Dict = {"k": k}
         if where_filter:
             kwargs["filter"] = where_filter
-
         return self.vectorstore.similarity_search(query, **kwargs)
 
     def build_filter(
@@ -76,6 +79,15 @@ class Retrievers:
         if defect_type == "good":
             return f"{category} normal product appearance"
         return f"{category} {defect_type} defect anomaly"
+
+    def build_generic_query(self, category: str) -> str:
+        """Build a production-style query without ground-truth defect_type.
+
+        MCQ 평가 시 데이터 유출(data leakage) 방지를 위해
+        defect_type 없이 카테고리 기반 generic 쿼리를 생성한다.
+        프로덕션 API가 defect_type을 모르는 상태와 동일한 조건으로 검색.
+        """
+        return f"{category} defect anomaly inspection"
 
     def format_context(self, docs: List[Document]) -> str:
         """Format retrieved documents into a text block for MLLM prompts.

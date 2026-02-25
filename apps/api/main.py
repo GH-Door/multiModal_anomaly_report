@@ -553,7 +553,9 @@ def _finalize_rag_llm_pipeline(
     ad_result: dict[str, Any],
     ad_decision: str,
     policy: dict[str, Any],
+    domain_rag_enabled: bool | None = None,
 ) -> None:
+    effective_domain_rag = domain_rag_enabled if domain_rag_enabled is not None else DOMAIN_RAG_ENABLED
     conn = pg.connect_fast(DATABASE_URL)
     ref_path: str | None = None
     try:
@@ -628,6 +630,7 @@ def _finalize_rag_llm_pipeline(
                 model_category,
                 ad_result,
                 policy,
+                domain_rag_enabled=effective_domain_rag,
             )
         finally:
             app.state.llm_lock.release()
@@ -847,6 +850,7 @@ def _run_inspection_pipeline(
     dataset: str,
     line: str,
     ingest_source_path: str | None,
+    domain_rag_enabled: bool | None = None,
 ) -> dict[str, Any]:
     model_category = _resolve_model_category(dataset=dataset, category=category)
     class_keys = _candidate_class_keys(dataset=dataset, model_category=model_category)
@@ -973,6 +977,7 @@ def _run_inspection_pipeline(
             ad_result=ad_result,
             ad_decision=ad_decision,
             policy=policy,
+            domain_rag_enabled=domain_rag_enabled,
         )
     except Exception as exc:
         logger.exception("Failed to enqueue RAG/LLM pipeline for report_id=%s", report_id)
@@ -1004,6 +1009,7 @@ def _run_single_inspection(
     dataset: str,
     line: str,
     ingest_source_path: str | None,
+    domain_rag_enabled: bool | None = None,
 ) -> dict[str, Any]:
     conn = pg.connect_fast(DATABASE_URL)
     try:
@@ -1015,6 +1021,7 @@ def _run_single_inspection(
             dataset=dataset,
             line=line,
             ingest_source_path=ingest_source_path,
+            domain_rag_enabled=domain_rag_enabled,
         )
     finally:
         conn.close()
@@ -1280,6 +1287,7 @@ async def run_inspection(
     category: str = Form(...),
     dataset: str = Form("default"),
     line: str = Form("line_1"),
+    domain_rag_enabled: bool | None = Form(None),
 ):
     """Run AD immediately and enqueue RAG/LLM stages for asynchronous completion."""
     try:
@@ -1292,6 +1300,7 @@ async def run_inspection(
             dataset,
             line,
             None,
+            domain_rag_enabled,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

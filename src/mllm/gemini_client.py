@@ -77,15 +77,23 @@ class GeminiClient(BaseLLMClient):
 
             except Exception as e:
                 retries += 1
+                err_str = str(e)
+                is_unavailable = "503" in err_str or "UNAVAILABLE" in err_str or "overloaded" in err_str.lower()
                 logger.warning(
                     "Gemini request failed (model=%s, attempt=%d/%d): %s",
                     self.model_name,
                     retries,
                     self.max_retries,
-                    str(e),
+                    err_str,
                 )
                 if retries < self.max_retries:
-                    time.sleep(retry_delay)
+                    # 503 UNAVAILABLE: 첫 2번은 짧게, 이후엔 길게 대기
+                    if is_unavailable and retries >= 2:
+                        wait = retry_delay * 5
+                    else:
+                        wait = retry_delay
+                    logger.info("Waiting %.0fs before retry...", wait)
+                    time.sleep(wait)
                     retry_delay *= 2
         logger.error(
             "Gemini request exhausted retries (model=%s, max_retries=%d)",
