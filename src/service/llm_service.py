@@ -244,8 +244,17 @@ class LlmService:
         ad_info_text = format_ad_info(ad_info)
 
         report_instruction: str | None = None
-        prompt_mode = "ad_only"
-        if domain_rag_enabled and self.domain_rag_service is not None:
+
+        # 요청 단위로 domain RAG 사용 여부를 명시적으로 비활성화한 경우
+        if not domain_rag_enabled:
+            prompt_mode = "ad_only_disabled"
+
+        # normal 판정: 결함 도메인 지식을 주입하면 LLM이 결함으로 오해할 소지가 있어 skip
+        # review_needed 판정: 경계 케이스로 도메인 지식 주입이 판정을 왜곡할 수 있어 skip
+        elif ad_decision_raw in ("normal", "review_needed"):
+            prompt_mode = "ad_only_skipped"
+
+        elif self.domain_rag_service is not None:
             try:
                 report_instruction = self.domain_rag_service.build_report_instruction(
                     model_category=category,
@@ -254,10 +263,14 @@ class LlmService:
                 )
             except Exception:
                 logger.exception("Domain knowledge RAG prompt build failed for category=%s", category)
+            # RAG 호출은 시도했으나 결과가 없는 경우 (서비스 미준비, 검색 실패 등)
+            prompt_mode = "domain_rag" if report_instruction else "ad_only_fallback"
 
-        if report_instruction:
-            prompt_mode = "domain_rag"
         else:
+            # domain_rag_service 자체가 초기화되지 않은 경우
+            prompt_mode = "ad_only_fallback"
+
+        if not report_instruction:
             report_instruction = REPORT_PROMPT_WITH_AD.format(
                 category=category,
                 ad_info=ad_info_text,

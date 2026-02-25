@@ -68,7 +68,6 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 INCOMING_WATCH_ENABLED = _env_bool("INCOMING_WATCH_ENABLED", True)
-RAG_ENABLED = _env_bool("RAG_ENABLED", True)
 DOMAIN_RAG_ENABLED = _env_bool("DOMAIN_RAG_ENABLED", True)
 
 LLM_MODEL_ALIASES = {
@@ -559,45 +558,37 @@ def _finalize_rag_llm_pipeline(
     conn = pg.connect_fast(DATABASE_URL)
     ref_path: str | None = None
     try:
-        if RAG_ENABLED:
-            _safe_update_report(
-                conn,
-                report_id,
-                {"pipeline_status": "processing", "pipeline_stage": "rag_running"},
-                context="rag_running",
-            )
+        _safe_update_report(
+            conn,
+            report_id,
+            {"pipeline_status": "processing", "pipeline_stage": "rag_running"},
+            context="rag_running",
+        )
 
-            try:
-                rag_results = app.state.rag_service.search_closest_normal(ad_result["original_path"], model_category)
-                ref_path = rag_results[0]["path"] if rag_results else None
-                _safe_update_report(
-                    conn,
-                    report_id,
-                    {
-                        "similar_image_path": ref_path,
-                        "pipeline_status": "processing",
-                        "pipeline_stage": "rag_done",
-                    },
-                    context="rag_done",
-                )
-            except Exception as exc:
-                logger.exception("RAG stage failed for report_id=%s", report_id)
-                _safe_update_report(
-                    conn,
-                    report_id,
-                    {
-                        "pipeline_status": "processing",
-                        "pipeline_stage": "rag_failed",
-                        "pipeline_error": f"RAG: {str(exc)[:500]}",
-                    },
-                    context="rag_failed",
-                )
-        else:
+        try:
+            rag_results = app.state.rag_service.search_closest_normal(ad_result["original_path"], model_category)
+            ref_path = rag_results[0]["path"] if rag_results else None
             _safe_update_report(
                 conn,
                 report_id,
-                {"pipeline_status": "processing", "pipeline_stage": "rag_skipped"},
-                context="rag_skipped",
+                {
+                    "similar_image_path": ref_path,
+                    "pipeline_status": "processing",
+                    "pipeline_stage": "rag_done",
+                },
+                context="rag_done",
+            )
+        except Exception as exc:
+            logger.exception("RAG stage failed for report_id=%s", report_id)
+            _safe_update_report(
+                conn,
+                report_id,
+                {
+                    "pipeline_status": "processing",
+                    "pipeline_stage": "rag_failed",
+                    "pipeline_error": f"RAG: {str(exc)[:500]}",
+                },
+                context="rag_failed",
             )
 
         _safe_update_report(
@@ -1270,7 +1261,6 @@ async def get_incoming_status():
         "llm_lock_timeout_sec": LLM_LOCK_TIMEOUT_SEC,
         "pipeline_watchdog_interval_sec": PIPELINE_WATCHDOG_INTERVAL_SEC,
         "pipeline_stale_seconds": PIPELINE_STALE_SECONDS,
-        "rag_enabled": RAG_ENABLED,
         "domain_rag_enabled": DOMAIN_RAG_ENABLED,
         "domain_rag_json_path": str(DOMAIN_KNOWLEDGE_JSON_PATH),
         "domain_rag_persist_dir": str(DOMAIN_RAG_PERSIST_DIR),
