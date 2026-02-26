@@ -26,7 +26,9 @@ https://github.com/user-attachments/assets/a9c36ca3-5f5e-4425-a644-5457553208bb
 
 ## Overview
 
-**Smart Factory Anomaly Reporting System** is an end-to-end multimodal pipeline that goes beyond conventional anomaly detection. Instead of just producing heatmaps, it automatically generates structured defect reports — including cause, location, and recommended actions — using LLMs augmented with domain knowledge and visual retrieval.
+**Smart Factory Anomaly Reporting System** is an end-to-end multimodal pipeline that goes beyond conventional anomaly detection.  
+Instead of just producing heatmaps, it automatically generates structured defect reports  
+— including cause, location, and recommended actions — using LLMs augmented with domain knowledge and visual retrieval. 
 
 Key capabilities:
 - **Anomaly Detection** via [Anomalib](https://github.com/open-edge-platform/anomalib) (PatchCore / EfficientAD / WinCLIP)
@@ -34,19 +36,19 @@ Key capabilities:
 - **Dual RAG**: Knowledge RAG (Chroma + domain JSON) + Visual RAG (DINOv2 few-shot)
 - **Multi-LLM Support**: GPT-4o, Claude Sonnet, Gemini 2.5, InternVL, Gemma3, Qwen, LLaVA
 - **Production API**: Async FastAPI pipeline with PostgreSQL + React dashboard
-- **Evaluated on [MMAD Benchmark](https://arxiv.org/abs/2410.09453)** — outperforms paper-reported GPT-4o SOTA
+- **Evaluated on [MMAD](https://arxiv.org/abs/2410.09453)** — outperforms paper-reported GPT-4o SOTA
 
 ---
 
 
 ## 📊 Results
 
-Evaluated on the [MMAD](https://arxiv.org/abs/2410.09453) MCQ evaluation protocol.
+Evaluated on the [MMAD](https://arxiv.org/abs/2410.09453) MCQ evaluation protocol.  
 **Gemma3-27B INT4 + AD + RAG achieves 75.1%, surpassing the paper-reported GPT-4o SOTA (74.9%).**
 
 > Evaluation set: GoodsAD (6 classes) + MVTec-LOCO (4 classes, `splicing_connectors` excluded), 99 images total, 1-shot
 
-### LLM Benchmark (LLM Only, No AD / No RAG)
+### LLM Results (LLM Only, No AD / No RAG)
 
 | Type | Model | Params | Accuracy (%) | Latency (s/img) |
 |:-----|:------|:------:|:------------:|:---------------:|
@@ -221,7 +223,7 @@ smart-factory-anomaly-report/
 ## 🙏 Acknowledgements
 
 - [Anomalib](https://github.com/open-edge-platform/anomalib) — anomaly detection backbone
-- [MMAD](https://arxiv.org/abs/2410.09453) — evaluation benchmark and dataset
+- [MMAD](https://arxiv.org/abs/2410.09453) — evaluation dataset
 - [DINOv2](https://github.com/facebookresearch/dinov2) — visual RAG backbone
 
 ---
