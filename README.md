@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white">
 </p>
 
-<video src="images/AI_report_Demo.mp4" controls width="80%"></video>
+https://github.com/user-attachments/assets/a9c36ca3-5f5e-4425-a644-5457553208bb
 
 </div>
 
