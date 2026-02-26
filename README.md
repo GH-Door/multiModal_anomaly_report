@@ -88,8 +88,10 @@ Evaluated on the [MMAD](https://arxiv.org/abs/2410.09453) MCQ evaluation protoco
 ---
 
 ## 🏗️ System Architecture
-![](2026-02-26-20-03-53.png)
-<img src="images/System_Architecture.png">
+
+<div align="center">
+<img src="images/System_Architecture.png" width="80%">
+</div>
 
 **Production Pipeline** (async):
 `POST /inspect` → `AdService.predict_batch()` → PostgreSQL initial save → ThreadPoolExecutor (RAG + LLM) → PostgreSQL final update  
