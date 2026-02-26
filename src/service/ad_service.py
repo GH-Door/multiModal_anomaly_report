@@ -390,7 +390,12 @@ class AdService:
         contour_overlay = input_img.copy()
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if contours:
-            cv2.drawContours(contour_overlay, contours, -1, (255, 0, 0), thickness=2)
+            # 반투명 채우기 (원본 70% + 색 30%)
+            fill_layer = contour_overlay.copy()
+            cv2.drawContours(fill_layer, contours, -1, (255, 0, 0), thickness=cv2.FILLED)
+            contour_overlay = cv2.addWeighted(contour_overlay, 0.7, fill_layer, 0.3, 0)
+            # 윤곽선 테두리 (두께 4px)
+            cv2.drawContours(contour_overlay, contours, -1, (255, 0, 0), thickness=4)
         Image.fromarray(contour_overlay).save(o_path)
 
         # [BACKUP] bbox 기반 overlay (필요 시 복구)
