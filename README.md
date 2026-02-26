@@ -38,18 +38,6 @@ Key capabilities:
 
 ---
 
-## Table of Contents
-
-- [Results](#-results)
-- [System Architecture](#️-system-architecture)
-- [RAG Pipeline](#-rag-pipeline)
-- [Supported Models](#-supported-models)
-- [Installation](#️-installation)
-- [Quick Start](#-quick-start)
-- [Project Structure](#-project-structure)
-- [Citation](#-citation)
-
----
 
 ## 📊 Results
 
@@ -90,7 +78,7 @@ Evaluated on the [MMAD](https://arxiv.org/abs/2410.09453) MCQ evaluation protoco
 ## 🏗️ System Architecture
 
 <div align="center">
-<img src="images/System_Architecture.png" width="80%">
+<img src="images/System_Architecture.png" width="90%">
 </div>
 
 **Production Pipeline** (async):
@@ -112,13 +100,6 @@ Watchdog: records stuck in `processing` for 120+ seconds are automatically marke
 
 DINOv2 (`dinov2_vits14`) Embedding → per-category `.pkl` index → top-k similar normal images as few-shot examples
 
-```python
-from src.rag.visual_rag import VisualRAG
-
-vrag = VisualRAG(index_dir="rag/")
-vrag.build_all(dataset_root="dataset/MMAD")      # build per-category pkl index
-results = vrag.search(query_image_path, category="carpet", k=1)
-```
 
 ---
 
@@ -145,14 +126,7 @@ results = vrag.search(query_image_path, category="carpet", k=1)
 - Docker & Docker Compose (for deployment)
 - PostgreSQL (for API server)
 
-### 1. Clone
-
-```bash
-git clone https://github.com/<org>/smart-factory-anomaly-report.git
-cd smart-factory-anomaly-report
-```
-
-### 2. Install Dependencies
+### 1. Install Dependencies
 
 ```bash
 # Install uv (if not present)
@@ -244,17 +218,6 @@ smart-factory-anomaly-report/
 
 ---
 
-## 📄 Documentation
-
-| Document | Description |
-|:---------|:------------|
-| [`docs/deploy-and-handoff.md`](docs/deploy-and-handoff.md) | Server deployment guide |
-| [`docs/experiment-runner.md`](docs/experiment-runner.md) | Benchmark experiment config |
-| [`docs/report-pipeline-guide.md`](docs/report-pipeline-guide.md) | Report generation pipeline |
-| [`docs/incoming-auto-ingest.md`](docs/incoming-auto-ingest.md) | Filesystem auto-ingest setup |
-
----
-
 ## 🙏 Acknowledgements
 
 - [Anomalib](https://github.com/open-edge-platform/anomalib) — anomaly detection backbone
@@ -263,20 +226,6 @@ smart-factory-anomaly-report/
 
 ---
 
-## 📝 Citation
-
-If you find this project useful, please cite the MMAD benchmark:
-
-```bibtex
-@article{jiang2024mmad,
-  title={MMAD: The First-Ever Comprehensive Benchmark for Multimodal LLMs in the Industrial Anomaly Detection Domain},
-  author={Jiang, Xi and others},
-  journal={arXiv preprint arXiv:2410.09453},
-  year={2024}
-}
-```
-
----
 
 ## License
 
