@@ -26,8 +26,8 @@ https://github.com/user-attachments/assets/a9c36ca3-5f5e-4425-a644-5457553208bb
 
 ## Overview
 
-**Smart Factory Anomaly Reporting System** is an end-to-end multimodal pipeline that goes beyond conventional anomaly detection.  
-Instead of just producing heatmaps, it automatically generates structured defect reports  
+**Smart Factory Anomaly Reporting System** is an end-to-end multimodal pipeline that goes beyond conventional anomaly detection.
+Instead of just producing heatmaps, it automatically generates structured defect reports
 — including cause, location, and recommended actions — using LLMs augmented with domain knowledge and visual retrieval. 
 
 Key capabilities:
@@ -46,7 +46,7 @@ Key capabilities:
 Evaluated on the [MMAD](https://arxiv.org/abs/2410.09453) MCQ evaluation protocol.  
 **Gemma3-27B INT4 + AD + RAG achieves 75.1%, surpassing the paper-reported GPT-4o SOTA (74.9%).**
 
-> Evaluation set: GoodsAD (6 classes) + MVTec-LOCO (4 classes, `splicing_connectors` excluded), 99 images total, 1-shot
+> Evaluation set: GoodsAD (6 classes) + MVTec-LOCO (4 classes), 99 images total, 1-shot
 
 ### LLM Results (LLM Only, No AD / No RAG)
 
@@ -83,9 +83,8 @@ Evaluated on the [MMAD](https://arxiv.org/abs/2410.09453) MCQ evaluation protoco
 <img src="images/System_Architecture.png" width="90%">
 </div>
 
-**Production Pipeline** (async):
-`POST /inspect` → `AdService.predict_batch()` → PostgreSQL initial save → ThreadPoolExecutor (RAG + LLM) → PostgreSQL final update  
-Watchdog: records stuck in `processing` for 120+ seconds are automatically marked as `failed`.
+**Production Pipeline**: `POST /inspect` → `AdService` → PostgreSQL → ThreadPool (RAG + LLM) → PostgreSQL<br>
+**Watchdog**: auto-fails records stuck in `processing` for 120s+
 
 ---
 
@@ -93,14 +92,16 @@ Watchdog: records stuck in `processing` for 120+ seconds are automatically marke
 
 ### Knowledge RAG
 
-`domain_knowledge.json` (`{dataset → category → defect_type → description}`) → Chroma Vector DB → Metadata Filter + Semantic Search → Prompt Injection
+`domain_knowledge.json` (`{dataset → category → defect_type → description}`)<br>
+→ Chroma Vector DB → Metadata Filter + Semantic Search → Prompt Injection
 
 - Embedding: `paraphrase-multilingual-MiniLM-L12-v2`
 - Vector DB: Chroma (local persist, `vectorstore/domain_knowledge/`)
 
 ### Visual RAG
 
-DINOv2 (`dinov2_vits14`) Embedding → per-category `.pkl` index → top-k similar normal images as few-shot examples
+DINOv2 (`dinov2_vits14`) Embedding → per-category `.pkl` index<br>
+→ top-k similar normal images as few-shot examples
 
 
 ---
