@@ -27,6 +27,9 @@ MODEL_REGISTRY = {
     "gemini-2.5-flash": {"type": "api", "class": "GeminiClient", "model": "gemini-2.5-flash"},
     "gemini-2.5-flash-lite": {"type": "api", "class": "GeminiClient", "model": "gemini-2.5-flash-lite"},
     "gemini-2.5-pro": {"type": "api", "class": "GeminiClient", "model": "gemini-2.5-pro"},
+    "gemini-3-flash-preview": {"type": "api", "class": "GeminiClient", "model": "gemini-3-flash-preview"},
+    "gemini-3-pro-preview": {"type": "api", "class": "GeminiClient", "model": "gemini-3-pro-preview"},
+    "gemini-3.1-pro-preview": {"type": "api", "class": "GeminiClient", "model": "gemini-3.1-pro-preview"},
 
     # Qwen models
     "qwen": {"type": "local", "class": "QwenVLClient", "model": "Qwen/Qwen2.5-VL-7B-Instruct"},

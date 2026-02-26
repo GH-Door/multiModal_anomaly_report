@@ -68,3 +68,6 @@ vectorstore/
 
 # legacy snapshot (temporary import source)
 legacy/
+
+# jupyter
+notebooks/
