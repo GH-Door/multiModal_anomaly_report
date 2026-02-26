@@ -68,7 +68,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 INCOMING_WATCH_ENABLED = _env_bool("INCOMING_WATCH_ENABLED", True)
-DOMAIN_RAG_ENABLED = _env_bool("DOMAIN_RAG_ENABLED", True)
+DOMAIN_RAG_ENABLED = _env_bool("DOMAIN_RAG_ENABLED", True) # False: RAG 사용 안함
 
 LLM_MODEL_ALIASES = {
     "internv1": "internvl",
