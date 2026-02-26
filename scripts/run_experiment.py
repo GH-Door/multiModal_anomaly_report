@@ -331,6 +331,17 @@ def run_experiment(cfg: ExperimentConfig) -> Path:
     if hasattr(llm_client, 'load_model'):
         print("Warming up model (pre-loading weights)...")
         llm_client.load_model()
+        print("Warming up with dummy forward pass...")
+        try:
+            warmup_rel = image_paths[0]
+            warmup_path = str(Path(data_root) / warmup_rel)
+            warmup_meta = mmad_data[warmup_rel]
+            if cfg.batch_mode:
+                llm_client.generate_answers_batch(warmup_path, warmup_meta, [], ad_info=None, instruction=None)
+            else:
+                llm_client.generate_answers(warmup_path, warmup_meta, [], ad_info=None, instruction=None)
+        except Exception:
+            pass
         print("Model ready.")
         print()
 

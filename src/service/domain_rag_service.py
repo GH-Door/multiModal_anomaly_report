@@ -173,11 +173,12 @@ class DomainKnowledgeRagService:
             return None
 
         ad_decision = str((ad_data or {}).get("ad_decision", "")).strip().lower()
-        if ad_decision == "review_needed":
-            # Uncertain AD decisions are common near class boundaries.
-            # Skipping domain RAG here avoids injecting defect-biased priors on likely-normal images.
+        # normal/review_needed 판정 시 결함 도메인 지식 주입을 방지하기 위한 안전망
+        # 1차 skip 판단은 llm_service에서 수행하며, 여기서는 이중 안전망으로 동작
+        if ad_decision in ("normal", "review_needed"):
             logger.info(
-                "Skip domain knowledge RAG for review_needed | model_category=%s",
+                "Skip domain knowledge RAG for %s | model_category=%s",
+                ad_decision,
                 model_category,
             )
             return None
